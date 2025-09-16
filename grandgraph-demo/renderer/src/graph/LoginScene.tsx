@@ -12,6 +12,7 @@ type MegaConfig = {
   baseColor?: [number, number, number];
   background?: [number, number, number];
   glow?: number; // alpha scaler
+  spokeFraction?: number; // 0..1 of particles biased along great-circle spokes
 };
 
 type Props = { onDone?: () => void; onConnect?: () => void; config?: MegaConfig };
@@ -32,6 +33,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     baseColor: [0.70, 0.62, 0.94] as [number, number, number],
     background: [0.04, 0.04, 0.07] as [number, number, number],
     glow: 0.95,
+    spokeFraction: 0.12,
     ...(config || {})
   };
 
@@ -62,6 +64,21 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
 
     // helpers
     function norm3(x: number, y: number, z: number) { const L = Math.hypot(x, y, z) || 1e-6; return [x / L, y / L, z / L] as const; }
+    function dot3(a: readonly [number,number,number], b: readonly [number,number,number]){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2] }
+    function slerp(a: readonly [number,number,number], b: readonly [number,number,number], t: number){
+      let omega = Math.acos(Math.max(-1, Math.min(1, dot3(a,b))))
+      if (omega < 1e-4){
+        return norm3(
+          a[0]*(1-t)+b[0]*t,
+          a[1]*(1-t)+b[1]*t,
+          a[2]*(1-t)+b[2]*t
+        )
+      }
+      const so = Math.sin(omega)
+      const s0 = Math.sin((1-t)*omega)/so
+      const s1 = Math.sin(t*omega)/so
+      return [a[0]*s0 + b[0]*s1, a[1]*s0 + b[1]*s1, a[2]*s0 + b[2]*s1] as const
+    }
     function sampleAround(mu: readonly [number, number, number], sigma: number) {
       const gx = (Math.random() * 2 - 1) + (Math.random() * 2 - 1) + (Math.random() * 2 - 1);
       const gy = (Math.random() * 2 - 1) + (Math.random() * 2 - 1) + (Math.random() * 2 - 1);
@@ -83,26 +100,41 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     const wSum = wCore + wClusterSmall + wClusterMid + wClusterFull + wShell + wDust;
     function fillRange(start: number, end: number){
       for (let i = start; i < end; i++) {
-        const u = Math.random() * wSum;
         let x = 0, y = 0, z = 0;
-        if (u < wCore) {
-          const d = uniformDir(); const R = radiusCore(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
-        } else if (u < wCore + wClusterSmall) {
-          const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.22);
-          const s = 0.28 + 0.18 * Math.random(); const R = 0.85 * (0.80 + 0.20 * Math.random());
-          x = d[0] * s * R; y = d[1] * s * R; z = d[2] * s * R;
-        } else if (u < wCore + wClusterSmall + wClusterMid) {
-          const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.18);
-          const s = 0.45 + 0.22 * Math.random(); const R = 0.88 * (0.85 + 0.25 * Math.random());
-          x = d[0] * s * R; y = d[1] * s * R; z = d[2] * s * R;
-        } else if (u < wCore + wClusterSmall + wClusterMid + wClusterFull) {
-          const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.12);
-          const R = radiusBody(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
-        } else if (u < wCore + wClusterSmall + wClusterMid + wClusterFull + wShell) {
-          const d = uniformDir(); const R = radiusShell(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
+        // a portion of points lie along great-circle arcs between cluster centers (faint spokes)
+        if (Math.random() < cfg.spokeFraction) {
+          const a = centers[(Math.random() * CLUSTERS) | 0]
+          let bIdx = (Math.random() * CLUSTERS) | 0
+          if (bIdx === 0 && CLUSTERS>1) bIdx = 1
+          const b = centers[bIdx]
+          const t = Math.pow(Math.random(), 0.65) // bias towards endpoints to hint lobes
+          const dir = slerp(a, b, t)
+          const R = 0.78 + 0.22 * Math.random()
+          const jitter = 0.06 * (Math.random()*2-1)
+          x = (dir[0] + jitter) * R
+          y = (dir[1] + jitter*0.7) * R
+          z = (dir[2] + jitter) * R
         } else {
-          const d = uniformDir(); const R = 0.20 + 0.80 * Math.random();
-          x = d[0] * R; y = d[1] * R; z = d[2] * R;
+          const u = Math.random() * wSum
+          if (u < wCore) {
+            const d = uniformDir(); const R = radiusCore(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
+          } else if (u < wCore + wClusterSmall) {
+            const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.20);
+            const s = 0.30 + 0.18 * Math.random(); const R = 0.84 * (0.80 + 0.20 * Math.random());
+            x = d[0] * s * R; y = d[1] * s * R; z = d[2] * s * R;
+          } else if (u < wCore + wClusterSmall + wClusterMid) {
+            const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.16);
+            const s = 0.48 + 0.20 * Math.random(); const R = 0.90 * (0.85 + 0.25 * Math.random());
+            x = d[0] * s * R; y = d[1] * s * R; z = d[2] * s * R;
+          } else if (u < wCore + wClusterSmall + wClusterMid + wClusterFull) {
+            const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.11);
+            const R = radiusBody(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
+          } else if (u < wCore + wClusterSmall + wClusterMid + wClusterFull + wShell) {
+            const d = uniformDir(); const R = radiusShell(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
+          } else {
+            const d = uniformDir(); const R = 0.20 + 0.80 * Math.random();
+            x = d[0] * R; y = d[1] * R; z = d[2] * R;
+          }
         }
         const j = 3 * i;
         pos0[j + 0] = x; pos0[j + 1] = y; pos0[j + 2] = z;
@@ -278,7 +310,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
           onClick={(e: React.MouseEvent<HTMLButtonElement>)=>{ e.preventDefault(); e.stopPropagation(); }}
           disabled={startedRef.current}
           style={{
-            position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)', zIndex: 1000,
+            position: 'absolute', left: '50%', top: '75%', transform: 'translate(-50%,-50%)', zIndex: 1000,
             padding: '14px 28px',
             background: 'linear-gradient(180deg, rgba(135,124,255,0.85), rgba(255,134,219,0.85))',
             color: '#0b0b12',
@@ -302,8 +334,8 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
         </button>
       )}
 
-      {/* bottom-right typing: "vector" with blinking underscore */}
-      <div style={{ position:'absolute', right:18, bottom:14, zIndex:999, color:'#fff', fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace', opacity:0.85, letterSpacing:0.5, fontSize:14 }}>
+      {/* large off-center typing: "vector" with blinking underscore */}
+      <div style={{ position:'absolute', left:'35%', top:'75%', transform:'translate(-50%, -50%)', zIndex:999, color:'#fff', fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace', opacity:0.9, letterSpacing:1.2, fontSize:70 }}>
         <Typewriter text="vector" />
       </div>
     </div>
