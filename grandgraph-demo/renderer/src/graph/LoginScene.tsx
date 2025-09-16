@@ -25,6 +25,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
   const startedRef = useRef(false);
   const doneRef = useRef(false);
   const filledRef = useRef(0); // number of points currently generated
+  const [companyTags, setCompanyTags] = useState<Array<{id: number, company: string, x: number, y: number, startTime: number, angle: number}>>([]);
 
   const cfg = {
     particleCount: 200000,
@@ -41,6 +42,15 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
   const phaseRef = useRef(0.0); // 0..1 (3D → 2D)
   const zoomRef = useRef(700);  // perspective-ish scaler
   const tiltRef = useRef(15 * Math.PI / 180); // tilt around X
+
+  // Company names for random tags
+  const companies = [
+    'Apple', 'Microsoft', 'Google', 'Amazon', 'Meta', 'Tesla', 'Netflix', 'Spotify', 'Adobe', 'Salesforce',
+    'Oracle', 'IBM', 'Intel', 'NVIDIA', 'AMD', 'Cisco', 'VMware', 'ServiceNow', 'Zoom', 'Slack',
+    'Shopify', 'Square', 'PayPal', 'Stripe', 'Coinbase', 'Robinhood', 'Uber', 'Lyft', 'Airbnb', 'DoorDash',
+    'Snowflake', 'Palantir', 'MongoDB', 'Atlassian', 'Twilio', 'Okta', 'CrowdStrike', 'Datadog', 'Unity', 'Roblox',
+    'Pinterest', 'Snap', 'Twitter', 'LinkedIn', 'TikTok', 'Discord', 'Reddit', 'Dropbox', 'Box', 'Figma'
+  ];
 
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -299,6 +309,35 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     };
     loop();
 
+    // Company tag animation system
+    const updateCompanyTags = () => {
+      const now = performance.now();
+      setCompanyTags(prev => {
+        // Remove expired tags (after 5 seconds)
+        const active = prev.filter(tag => now - tag.startTime < 5000);
+        
+        // Add new tags if we have fewer than 5 and randomly spawn
+        if (active.length < 5 && Math.random() < 0.008) { // ~0.8% chance per frame at 60fps
+          const company = companies[Math.floor(Math.random() * companies.length)];
+          const canvas = canvasRef.current;
+          if (canvas) {
+            const newTag = {
+              id: Math.random(),
+              company,
+              x: 0.2 + Math.random() * 0.6, // 20-80% across screen
+              y: 0.2 + Math.random() * 0.6, // 20-80% down screen
+              startTime: now,
+              angle: Math.random() * Math.PI * 2
+            };
+            return [...active, newTag];
+          }
+        }
+        return active;
+      });
+      requestAnimationFrame(updateCompanyTags);
+    };
+    updateCompanyTags();
+
     // Start non-blocking data generation and update buffers incrementally
     const CHUNK = 20000;
     const scheduler = (cb: any) => {
@@ -390,6 +429,43 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
           </button>
         )}
       </div>
+
+      {/* Floating company tags */}
+      {companyTags.map(tag => {
+        const now = performance.now();
+        const elapsed = now - tag.startTime;
+        const progress = elapsed / 5000; // 0..1 over 5 seconds
+        const opacity = progress < 0.1 ? progress * 10 : progress > 0.9 ? (1 - progress) * 10 : 1;
+        const rotation = tag.angle + (elapsed / 1000) * 0.5; // slow rotation
+        const radius = 30 + Math.sin(elapsed / 800) * 8; // gentle orbit
+        const offsetX = Math.cos(rotation) * radius;
+        const offsetY = Math.sin(rotation) * radius;
+
+        return (
+          <div
+            key={tag.id}
+            style={{
+              position: 'absolute',
+              left: `${tag.x * 100}%`,
+              top: `${tag.y * 100}%`,
+              transform: `translate(${offsetX - 50}px, ${offsetY - 50}px)`,
+              opacity,
+              color: '#fff',
+              fontSize: 12,
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+              background: 'rgba(0,0,0,0.6)',
+              padding: '4px 8px',
+              borderRadius: 4,
+              border: '1px solid rgba(255,255,255,0.2)',
+              pointerEvents: 'none',
+              whiteSpace: 'nowrap',
+              zIndex: 999
+            }}
+          >
+            {tag.company}
+          </div>
+        );
+      })}
     </div>
   );
 }
