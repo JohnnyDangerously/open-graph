@@ -27,7 +27,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
   const filledRef = useRef(0); // number of points currently generated
 
   const cfg = {
-    particleCount: 300000,
+    particleCount: 360000,
     clusterCount: 9,
     pointSizePx: 2.9,
     baseColor: [0.70, 0.62, 0.94] as [number, number, number],
@@ -93,11 +93,11 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     // smooth radius samplers (no shells!)
     function radiusCore() { return 0.02 + 0.18 * Math.pow(Math.random(), 1.6); }
     function radiusBody() { return 0.30 + 0.60 * Math.pow(Math.random(), 0.9); }
-    function radiusShell() { return 0.86 + 0.14 * Math.pow(Math.random(), 2.0); }
+    function radiusShell() { return 0.92 + 0.08 * Math.pow(Math.random(), 2.4); }
 
     // mixture weights (soft)
     // Increase shell presence for visible outer halo of dots
-    const wCore = 0.10, wClusterSmall = 0.20, wClusterMid = 0.18, wClusterFull = 0.22, wShell = 0.22, wDust = 0.08;
+    const wCore = 0.10, wClusterSmall = 0.20, wClusterMid = 0.18, wClusterFull = 0.20, wShell = 0.26, wDust = 0.06;
     const wSum = wCore + wClusterSmall + wClusterMid + wClusterFull + wShell + wDust;
     function fillRange(start: number, end: number){
       for (let i = start; i < end; i++) {
@@ -223,7 +223,9 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
         vec2 clip = (screen / (0.5 * u_view));
         gl_Position = vec4(clip, 0.0, 1.0);
         gl_PointSize = u_pointPx;
-        v_alpha = (0.10 + 0.20 * hash11(a_seed*9.9)) * u_glow;
+        // Boost alpha slightly for near-shell samples (approx via projected length)
+        float shellBoost = smoothstep(0.65, 0.98, length(p));
+        v_alpha = (0.10 + 0.20 * hash11(a_seed*9.9)) * (u_glow + 0.15 * shellBoost);
       }
       `,
       frag: `

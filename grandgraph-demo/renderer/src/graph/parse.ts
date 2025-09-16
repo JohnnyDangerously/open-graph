@@ -62,3 +62,63 @@ export function makeDemoTile(numNeighbors = 800): ParsedTile {
 }
 
 
+// JSON tile parser (supports two shapes: with meta.* or flat nodes/coords)
+export function parseJsonTile(json: any): ParsedTile {
+  // Shape A (recommended): { meta:{nodes:[...]}, coords:{nodes:[x,y], edges:[[s,t]]} }
+  if (json && json.meta && Array.isArray(json.meta.nodes) && json.coords) {
+    const N = json.meta.nodes.length | 0
+    const nodes = new Float32Array(N * 2)
+    const size = new Float32Array(N)
+    const alpha = new Float32Array(N)
+    const group = new Uint16Array(N)
+    const flags = new Uint8Array(N)
+    for (let i = 0; i < N; i++) {
+      const xy = json.coords.nodes[i]
+      nodes[2 * i] = xy[0]
+      nodes[2 * i + 1] = xy[1]
+      size[i] = i ? 4 : 12
+      alpha[i] = i ? 0.85 : 1.0
+      const n = json.meta.nodes[i] || {}
+      group[i] = (n.group | 0) >>> 0
+      flags[i] = (n.flags | 0) >>> 0
+    }
+    let edges: Uint32Array | undefined
+    if (Array.isArray(json.coords.edges)) {
+      const E = json.coords.edges.length
+      const flat = new Uint32Array(E * 2)
+      for (let e = 0; e < E; e++) { const p = json.coords.edges[e]; flat[2 * e] = p[0] | 0; flat[2 * e + 1] = p[1] | 0 }
+      edges = flat
+    }
+    return { nodes, size, alpha, group, flags, edges, count: N }
+  }
+  // Shape B: { nodes:[{id, group, flags}], coords:{nodes:[[x,y]], edges:[[s,t]]} or coords omitted
+  if (json && Array.isArray(json.nodes) && json.coords) {
+    const N = json.nodes.length | 0
+    const nodes = new Float32Array(N * 2)
+    const size = new Float32Array(N)
+    const alpha = new Float32Array(N)
+    const group = new Uint16Array(N)
+    const flags = new Uint8Array(N)
+    for (let i = 0; i < N; i++) {
+      const xy = json.coords.nodes[i]
+      nodes[2 * i] = xy[0]
+      nodes[2 * i + 1] = xy[1]
+      size[i] = i ? 4 : 12
+      alpha[i] = i ? 0.85 : 1.0
+      const n = json.nodes[i] || {}
+      group[i] = (n.group | 0) >>> 0
+      flags[i] = (n.flags | 0) >>> 0
+    }
+    let edges: Uint32Array | undefined
+    if (Array.isArray(json.coords.edges)) {
+      const E = json.coords.edges.length
+      const flat = new Uint32Array(E * 2)
+      for (let e = 0; e < E; e++) { const p = json.coords.edges[e]; flat[2 * e] = p[0] | 0; flat[2 * e + 1] = p[1] | 0 }
+      edges = flat
+    }
+    return { nodes, size, alpha, group, flags, edges, count: N }
+  }
+  throw new Error('Unsupported JSON tile shape')
+}
+
+
