@@ -1,0 +1,253 @@
+import React, { useEffect, useRef, useState } from 'react';
+import createREGL, { Regl } from 'regl';
+
+function easeInOutCubic(t: number) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2 }
+function clamp01(x: number) { return Math.min(1, Math.max(0, x)) }
+
+type Props = { onDone?: () => void; onConnect?: () => void };
+
+export default function LoginScene({ onDone, onConnect }: Props) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const reglRef = useRef<Regl | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const [animating, setAnimating] = useState(false);
+  const startedRef = useRef(false);
+  const doneRef = useRef(false);
+
+  // animated uniform sources
+  const phaseRef = useRef(0.0); // 0..1 (3D → 2D)
+  const zoomRef = useRef(700);  // perspective-ish scaler
+  const tiltRef = useRef(15 * Math.PI / 180); // tilt around X
+
+  useEffect(() => {
+    const canvas = canvasRef.current!;
+    if (!canvas) return;
+
+    // --- data (300k points) ---
+    // --- data (300k points) ---
+    // Smooth multi-cluster sphere: continuous radius, soft vMF clusters, light background dust.
+    const N = 300000;
+    const pos0 = new Float32Array(N * 3);
+    const group = new Float32Array(N);
+    const seed = new Float32Array(N);
+
+    // cluster centers via Fibonacci sphere
+    const CLUSTERS = 9;
+    const centers: Array<[number, number, number]> = [];
+    const golden = Math.PI * (3 - Math.sqrt(5));
+    for (let k = 0; k < CLUSTERS; k++) {
+      const y = 1 - 2 * (k + 0.5) / CLUSTERS;
+      const r = Math.sqrt(Math.max(0, 1 - y * y));
+      const th = golden * (k + 1);
+      centers.push([Math.cos(th) * r, y, Math.sin(th) * r]);
+    }
+
+    // helpers
+    function norm3(x: number, y: number, z: number) { const L = Math.hypot(x, y, z) || 1e-6; return [x / L, y / L, z / L] as const; }
+    function sampleAround(mu: readonly [number, number, number], sigma: number) {
+      const gx = (Math.random() * 2 - 1) + (Math.random() * 2 - 1) + (Math.random() * 2 - 1);
+      const gy = (Math.random() * 2 - 1) + (Math.random() * 2 - 1) + (Math.random() * 2 - 1);
+      const gz = (Math.random() * 2 - 1) + (Math.random() * 2 - 1) + (Math.random() * 2 - 1);
+      return norm3(mu[0] + sigma * gx, mu[1] + sigma * gy, mu[2] + sigma * gz);
+    }
+    function uniformDir() {
+      const u = Math.random(), v = Math.random();
+      const z = 2 * v - 1, r = Math.sqrt(Math.max(0, 1 - z * z)), phi = 2 * Math.PI * u;
+      return [r * Math.cos(phi), r * Math.sin(phi), z] as const;
+    }
+    // smooth radius samplers (no shells!)
+    function radiusCore() { return 0.02 + 0.18 * Math.pow(Math.random(), 1.6); }
+    function radiusBody() { return 0.30 + 0.60 * Math.pow(Math.random(), 0.9); }
+    function radiusShell() { return 0.86 + 0.14 * Math.pow(Math.random(), 2.0); }
+
+    // mixture weights (soft)
+    const wCore = 0.14, wClusterSmall = 0.22, wClusterMid = 0.20, wClusterFull = 0.20, wShell = 0.14, wDust = 0.10;
+    const wSum = wCore + wClusterSmall + wClusterMid + wClusterFull + wShell + wDust;
+
+    for (let i = 0; i < N; i++) {
+      const u = Math.random() * wSum;
+      let x = 0, y = 0, z = 0, g = 0;
+      if (u < wCore) {
+        const d = uniformDir(); const R = radiusCore(); x = d[0] * R; y = d[1] * R; z = d[2] * R; g = 0;
+      } else if (u < wCore + wClusterSmall) {
+        const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.22);
+        const s = 0.28 + 0.18 * Math.random(); const R = 0.85 * (0.80 + 0.20 * Math.random());
+        x = d[0] * s * R; y = d[1] * s * R; z = d[2] * s * R; g = 2;
+      } else if (u < wCore + wClusterSmall + wClusterMid) {
+        const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.18);
+        const s = 0.45 + 0.22 * Math.random(); const R = 0.88 * (0.85 + 0.25 * Math.random());
+        x = d[0] * s * R; y = d[1] * s * R; z = d[2] * s * R; g = 3;
+      } else if (u < wCore + wClusterSmall + wClusterMid + wClusterFull) {
+        const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.12);
+        const R = radiusBody(); x = d[0] * R; y = d[1] * R; z = d[2] * R; g = 4;
+      } else if (u < wCore + wClusterSmall + wClusterMid + wClusterFull + wShell) {
+        const d = uniformDir(); const R = radiusShell(); x = d[0] * R; y = d[1] * R; z = d[2] * R; g = 6;
+      } else {
+        const d = uniformDir(); const R = 0.20 + 0.80 * Math.random();
+        x = d[0] * R; y = d[1] * R; z = d[2] * R; g = 7;
+      }
+      pos0[3 * i + 0] = x; pos0[3 * i + 1] = y; pos0[3 * i + 2] = z;
+      group[i] = g; seed[i] = Math.random();
+    }
+
+    // no decorative lines; particles only
+
+    const regl = createREGL({ canvas, attributes: { antialias: false, alpha: false, depth: false } });
+    reglRef.current = regl;
+
+    const resize = () => {
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+    };
+    resize();
+    window.addEventListener('resize', resize);
+
+    // --- buffers ---
+    const posBuf = regl.buffer(pos0);
+    const grpBuf = regl.buffer(group);
+    const sedBuf = regl.buffer(seed);
+    // no edges buffer since lines are removed
+
+    const draw = regl({
+      vert: `
+      precision highp float;
+      attribute vec3 a_pos0;
+      attribute float a_group, a_seed;
+      uniform float u_time, u_phase, u_zoom;
+      uniform vec2  u_view;
+      uniform mat3  u_rot;
+      varying float v_alpha;
+
+      float hash11(float p){
+        p = fract(p*0.1031);
+        p *= p + 33.33;
+        p *= p + p;
+        return fract(p);
+      }
+      // subtle swirl removed to avoid visible banding; use gentle global yaw below
+      void main(){
+        vec3 p = a_pos0;
+        float j = 0.008 * sin(u_time*1.7 + a_seed*6.28);
+        p += j * normalize(vec3(sin(a_seed*4.1), cos(a_seed*3.7), sin(a_seed*2.3)));
+        p.z *= (1.0 - u_phase);
+        // global slow yaw to feel alive
+        float cy = cos(u_time*0.12), sy = sin(u_time*0.12);
+        mat3 ry = mat3(cy,0.0,sy, 0.0,1.0,0.0, -sy,0.0,cy);
+        vec3 pr = u_rot * (ry * p);
+        float f = 1.0 / (1.0 + pr.z * 0.8);
+        vec2 screen = pr.xy * (u_zoom * f);
+        // centered mapping (no offset), so the globe sits in the middle
+        vec2 clip = (screen / (0.5 * u_view));
+        gl_Position = vec4(clip, 0.0, 1.0);
+        gl_PointSize = 2.9;
+
+        v_alpha = 0.10 + 0.20 * hash11(a_seed*9.9);
+      }
+      `,
+      frag: `
+      precision highp float;
+      varying float v_alpha;
+      void main(){
+        vec2 p = gl_PointCoord*2.0 - 1.0;
+        float d = dot(p,p);
+        if (d>1.0) discard;
+        float fall = exp(-3.6*d);
+        // flatter pastel color, avoid hot white accumulation
+        vec3 rgb = vec3(0.70, 0.62, 0.94);
+        float alpha = v_alpha * fall * 0.95;
+        gl_FragColor = vec4(rgb, alpha);
+      }
+      `,
+      attributes: {
+        a_pos0: { buffer: posBuf, size: 3 },
+        a_seed: sedBuf,
+      },
+      uniforms: {
+        u_time: () => performance.now() / 1000,
+        u_phase: () => phaseRef.current,
+        u_zoom: () => zoomRef.current,
+        u_view: ({ viewportWidth, viewportHeight }: any) => [viewportWidth, viewportHeight],
+        u_rot: () => {
+          const c = Math.cos(tiltRef.current), s = Math.sin(tiltRef.current);
+          return [1, 0, 0, 0, c, -s, 0, s, c];
+        }
+      },
+      count: N,
+      primitive: 'points',
+      depth: { enable: false },
+      blend: { enable: true, func: { srcRGB: 'src alpha', srcAlpha: 'one', dstRGB: 'one minus src alpha', dstAlpha: 'one minus src alpha' } }
+    });
+
+    // removed drawLines pass
+
+    const loop = () => {
+      regl.poll();
+      regl.clear({ color: [0.04, 0.04, 0.07, 1] });
+      draw();
+      // particles only
+      rafRef.current = requestAnimationFrame(loop);
+    };
+    loop();
+
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      window.removeEventListener('resize', resize);
+      try { regl.destroy(); } catch {}
+      reglRef.current = null;
+    };
+  }, []);
+
+  // Connect animation: 2s; zoom forward, tilt to top-down, flatten to 2D
+  const start = () => {
+    if (startedRef.current || animating || !reglRef.current) return;
+    startedRef.current = true;
+    setAnimating(true);
+    const T = 2000;
+    const t0 = performance.now();
+
+    const tick = (now: number) => {
+      const dt = now - t0;
+      const p = clamp01(dt / T);
+      const zP = clamp01(dt / 600);
+      const rP = clamp01((dt - 200) / 1200);
+      const fP = clamp01((dt - 600) / 1000);
+
+      zoomRef.current = 700 + 400 * easeInOutCubic(zP);
+      tiltRef.current = (15 + 75 * easeInOutCubic(rP)) * Math.PI / 180;
+      phaseRef.current = easeInOutCubic(fP);
+
+      if (p < 1) requestAnimationFrame(tick);
+      else {
+        if (!doneRef.current) {
+          doneRef.current = true;
+          setAnimating(false);
+          (onDone || onConnect)?.();
+        }
+      }
+    };
+
+    requestAnimationFrame(tick);
+  };
+
+  return (
+    <div style={{ position: 'absolute', inset: 0 }}>
+      <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+      {!animating && (
+        <button
+          onMouseDown={(e)=>{ e.preventDefault(); e.stopPropagation(); start(); }}
+          onClick={(e)=>{ e.preventDefault(); e.stopPropagation(); }}
+          disabled={startedRef.current}
+          style={{
+            position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)', zIndex: 1000,
+            padding: '12px 24px', background: 'rgba(255,255,255,0.08)', color: '#fff',
+            border: '1px solid rgba(255,255,255,0.2)', borderRadius: 10, cursor: 'pointer'
+          }}
+        >
+          Connect
+        </button>
+      )}
+    </div>
+  );
+}
+

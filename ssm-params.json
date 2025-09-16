@@ -1,0 +1,1 @@
+{"commands":["echo  | base64 -d | sudo tee -a /home/ubuntu/server.py >/dev/null","sudo systemctl restart via-graph.service","curl -sS http://127.0.0.1/resolve?linkedin_url=https://www.linkedin.com/in/john-kalogerakis/"]}
