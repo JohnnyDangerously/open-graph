@@ -158,6 +158,54 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     // --- buffers ---
     const posBuf = regl.buffer({ usage: 'dynamic', type: 'float', length: pos0.byteLength });
     const sedBuf = regl.buffer({ usage: 'dynamic', type: 'float', length: seed.byteLength });
+    // screen-space quad for outer sphere ring
+    const quad = regl.buffer(new Float32Array([
+      -1, -1,
+       1, -1,
+      -1,  1,
+       1,  1,
+    ]));
+
+    const drawOuter = regl({
+      vert: `
+      precision highp float;
+      attribute vec2 a_pos; // clip-space
+      varying vec2 v_uv; // pixel coords
+      uniform vec2 u_view;
+      void main(){
+        gl_Position = vec4(a_pos, 0.0, 1.0);
+        v_uv = (a_pos*0.5 + 0.5) * u_view; // pixels
+      }`,
+      frag: `
+      precision highp float;
+      varying vec2 v_uv;
+      uniform vec2 u_view;
+      uniform vec3 u_color;
+      uniform float u_radiusPx; // target radius in pixels
+      uniform float u_thicknessPx; // ring thickness
+      uniform float u_alpha;
+      float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      void main(){
+        vec2 center = 0.5 * u_view;
+        float d = length(v_uv - center);
+        float ring = exp(-pow((d - u_radiusPx) / max(1.0, u_thicknessPx), 2.0));
+        float grain = 0.6 + 0.4 * hash(v_uv * 0.75);
+        float a = u_alpha * ring * grain;
+        gl_FragColor = vec4(u_color, a);
+      }`,
+      attributes: { a_pos: { buffer: quad, size: 2 } },
+      uniforms: {
+        u_view: ({ viewportWidth, viewportHeight }: any) => [viewportWidth, viewportHeight],
+        u_color: () => cfg.baseColor,
+        u_radiusPx: ({ viewportWidth, viewportHeight }: any) => 0.48 * Math.min(viewportWidth, viewportHeight),
+        u_thicknessPx: ({ viewportWidth, viewportHeight }: any) => 0.02 * Math.min(viewportWidth, viewportHeight),
+        u_alpha: () => 0.12,
+      },
+      primitive: 'triangle strip',
+      count: 4,
+      depth: { enable: false },
+      blend: { enable: true, func: { srcRGB: 'one', srcAlpha: 'one', dstRGB: 'one', dstAlpha: 'one' } }
+    });
     // no edges buffer since lines are removed
 
     const draw = regl({
@@ -239,6 +287,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     const loop = () => {
       regl.poll();
       regl.clear({ color: [cfg.background[0], cfg.background[1], cfg.background[2], 1] });
+      drawOuter();
       draw();
       rafRef.current = requestAnimationFrame(loop);
     };
@@ -304,39 +353,36 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
   return (
     <div style={{ position: 'absolute', inset: 0 }}>
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
-      {!animating && (
-        <button
-          onMouseDown={(e: React.MouseEvent<HTMLButtonElement>)=>{ e.preventDefault(); e.stopPropagation(); start(); }}
-          onClick={(e: React.MouseEvent<HTMLButtonElement>)=>{ e.preventDefault(); e.stopPropagation(); }}
-          disabled={startedRef.current}
-          style={{
-            position: 'absolute', left: '50%', top: '75%', transform: 'translate(-50%,-50%)', zIndex: 1000,
-            padding: '14px 28px',
-            background: 'linear-gradient(180deg, rgba(135,124,255,0.85), rgba(255,134,219,0.85))',
-            color: '#0b0b12',
-            border: '1px solid rgba(255,255,255,0.35)',
-            borderRadius: 14,
-            cursor: 'pointer',
-            boxShadow: '0 8px 30px rgba(186,128,255,0.35), 0 2px 8px rgba(0,0,0,0.35)',
-            fontWeight: 700,
-            letterSpacing: 0.6,
-            fontSize: 18,
-            backdropFilter: 'blur(3px)',
-            transition: 'transform 180ms ease, box-shadow 180ms ease, filter 180ms ease',
-            outline: '2px solid rgba(255,255,255,0.18)'
-          }}
-          onMouseEnter={(e: any)=>{ e.currentTarget.style.transform='translate(-50%,-50%) scale(1.04)'; e.currentTarget.style.boxShadow='0 10px 36px rgba(200,150,255,0.45), 0 3px 10px rgba(0,0,0,0.4)'; }}
-          onMouseLeave={(e: any)=>{ e.currentTarget.style.transform='translate(-50%,-50%) scale(1.0)'; e.currentTarget.style.boxShadow='0 8px 30px rgba(186,128,255,0.35), 0 2px 8px rgba(0,0,0,0.35)'; }}
-          onFocus={(e: any)=>{ e.currentTarget.style.filter='brightness(1.05)'; }}
-          onBlur={(e: any)=>{ e.currentTarget.style.filter='none'; }}
-        >
-          Connect
-        </button>
-      )}
-
-      {/* large off-center typing: "vector" with blinking underscore */}
-      <div style={{ position:'absolute', left:'35%', top:'75%', transform:'translate(-50%, -50%)', zIndex:999, color:'#fff', fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace', opacity:0.9, letterSpacing:1.2, fontSize:70 }}>
-        <Typewriter text="vector" />
+      {/* Wordmark + button stack */}
+      <div style={{ position:'absolute', left:'35%', top:'75%', transform:'translate(-50%, -50%)', zIndex:1000, color:'#fff', textAlign:'left' as const }}>
+        <div style={{ fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace', opacity:0.9, letterSpacing:1.2, fontSize:70, lineHeight:1 }}>
+          <Typewriter text="vector" />
+        </div>
+        {!animating && (
+          <button
+            onMouseDown={(e: React.MouseEvent<HTMLButtonElement>)=>{ e.preventDefault(); e.stopPropagation(); start(); }}
+            onClick={(e: React.MouseEvent<HTMLButtonElement>)=>{ e.preventDefault(); e.stopPropagation(); }}
+            disabled={startedRef.current}
+            style={{
+              marginTop: 16,
+              padding: '10px 22px',
+              background: '#ffffff',
+              color: '#111',
+              border: '1px solid rgba(255,255,255,0.9)',
+              borderRadius: 12,
+              cursor: 'pointer',
+              boxShadow: '0 10px 30px rgba(255,255,255,0.07), 0 3px 10px rgba(0,0,0,0.3)',
+              fontWeight: 700,
+              letterSpacing: 0.4,
+              fontSize: 16,
+              transition: 'transform 160ms ease, box-shadow 160ms ease',
+            }}
+            onMouseEnter={(e: any)=>{ e.currentTarget.style.transform='scale(1.04)'; }}
+            onMouseLeave={(e: any)=>{ e.currentTarget.style.transform='scale(1.0)'; }}
+          >
+            Connect
+          </button>
+        )}
       </div>
     </div>
   );
