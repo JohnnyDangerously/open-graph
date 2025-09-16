@@ -27,8 +27,8 @@ export default function TriplesModal({ open, onClose, triples }:{ open:boolean, 
 
   const Row = ({ t, index }:{ t: Triple, index: number }) => {
     const isMain = !!t.highlighted;
-    const avatarSize = isMain ? 72 : 44;
-    const gap = isMain ? 18 : 12;
+    const avatarSize = isMain ? 88 : 44;
+    const gap = isMain ? 24 : 12;
     const rowOpacity = isMain ? 1 : 0.55;
     const rowScale = isMain ? 1 : 0.9;
 
@@ -46,26 +46,102 @@ export default function TriplesModal({ open, onClose, triples }:{ open:boolean, 
 
     const symmetryColor = t.scores.transactionalSymmetry === 'junior_to_senior' ? '#ff9f43' : t.scores.transactionalSymmetry === 'senior_to_junior' ? '#ffa552' : '#ffa552';
 
-    return (
-      <div style={{ transform:`scale(${rowScale})`, opacity: rowOpacity, transition:'all 160ms ease', padding:'10px 14px', borderRadius:14, border: isMain? '1px solid rgba(79,124,255,0.25)':'1px solid rgba(0,0,0,0)', background: isMain? 'linear-gradient(180deg, rgba(79,124,255,0.08), rgba(79,124,255,0.03))':'transparent' }}>
-        <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:gap }}>
-          {[t.left, t.middle, t.right].map((p,i)=> (
-            <div key={i} style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:6 }}>
-              <img src={p.avatarUrl} alt={p.name} style={{ width:avatarSize, height:avatarSize, borderRadius:'50%', objectFit:'cover', boxShadow: isMain? '0 8px 24px rgba(0,0,0,0.25)':'0 4px 14px rgba(0,0,0,0.2)', border: isMain? '2px solid rgba(255,255,255,0.9)':'1px solid rgba(255,255,255,0.6)' }} />
-              <div style={{ fontSize:isMain? 13:11, fontWeight:500, color:'#0b122a' }}>{p.name}</div>
-            </div>
-          ))}
+    if (!isMain) {
+      return (
+        <div style={{ transform:`scale(${rowScale})`, opacity: rowOpacity, transition:'all 160ms ease', padding:'10px 14px', borderRadius:14 }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:gap }}>
+            {[t.left, t.middle, t.right].map((p,i)=> (
+              <div key={i} style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:6 }}>
+                <img src={p.avatarUrl} alt={p.name} style={{ width:avatarSize, height:avatarSize, borderRadius:'50%', objectFit:'cover', boxShadow:'0 4px 14px rgba(0,0,0,0.2)', border:'1px solid rgba(0,0,0,0.08)' }} />
+                <div style={{ fontSize:11, fontWeight:500, color:'#0b122a', opacity:0.85 }}>{p.name}</div>
+              </div>
+            ))}
+          </div>
         </div>
+      );
+    }
 
-        {/* Badges around the main row */}
-        <div style={{ display:'flex', justifyContent:'center', gap:10, marginTop: isMain? 14: 10, flexWrap:'wrap' }}>
-          <Pill color="#22c55e" label="L–M" value={t.scores.pairLM.toFixed(2)} />
-          <Pill color="#22c55e" label="M–R" value={t.scores.pairMR.toFixed(2)} />
-          <Pill color="#22c55e" label="L–R" value={t.scores.pairLR.toFixed(2)} />
-          <Pill color="#3b82f6" label="Triadic" value={`${t.scores.triadicClosure.toFixed(2)}`} />
-          <Pill color={symmetryColor} label="Transactional" value={symbolizeSymmetry(t.scores.transactionalSymmetry)} />
-          <Pill color="#6d28d9" label="Opportunity Fit" value={`${Math.round(t.scores.opportunityFit)}%`} />
-          <Pill color="#0ea5e9" label="Fan-In" value={`${Math.round(t.scores.fanIn)}pctl`} />
+    // Highlighted row with bracketed scoring overlay
+    const WIDTH = 680;
+    const AV = avatarSize; // 88
+    const GAP = 120; // generous spacing
+    const center = WIDTH / 2;
+    const c1 = center - (AV + GAP);
+    const c2 = center;
+    const c3 = center + (AV + GAP);
+    const topY = 22;
+    const abovePairY = 44;
+    const avatarY = 78;
+    const belowPairY = 138;
+    const triadicY = 164;
+    const bottomY = 180;
+    const leftBracketX = c1 - AV/2 - 56;
+    const rightBracketX = c3 + AV/2 + 56;
+
+    const Line = ({ x1, x2, y }:{ x1:number, x2:number, y:number }) => (
+      <line x1={x1} x2={x2} y1={y} y2={y} stroke="#0b122a" strokeOpacity={0.25} strokeWidth={6} strokeLinecap="round" />
+    );
+
+    const VLine = ({ x, y1, y2 }:{ x:number, y1:number, y2:number }) => (
+      <line x1={x} x2={x} y1={y1} y2={y2} stroke="#0b122a" strokeOpacity={0.25} strokeWidth={6} strokeLinecap="round" />
+    );
+
+    const Badge = ({ x, y, color, label }:{ x:number, y:number, color:string, label:string }) => (
+      <foreignObject x={x} y={y} width={260} height={28} style={{ overflow:'visible' }}>
+        <div style={{ display:'inline-flex', alignItems:'center', gap:6, padding:'6px 10px', borderRadius:999, background:`${color}12`, color, fontSize:12, border:`1px solid ${color}40`, transform:'translate(-50%, -50%)' }}>{label}</div>
+      </foreignObject>
+    );
+
+    return (
+      <div style={{ transform:`scale(${rowScale})`, opacity: rowOpacity, transition:'all 160ms ease', padding:'16px 14px 10px 14px', borderRadius:16, border:'1px solid rgba(79,124,255,0.18)', background:'linear-gradient(180deg, rgba(79,124,255,0.06), rgba(79,124,255,0.02))' }}>
+        <div style={{ width:WIDTH, maxWidth:'92vw', position:'relative', margin:'0 auto' }}>
+          {/* SVG overlay for brackets */}
+          <svg width={WIDTH} height={200} style={{ position:'absolute', inset:0, pointerEvents:'none' }}>
+            {/* Top bracket across all three */}
+            <Line x1={c1 - AV/2} x2={c3 + AV/2} y={topY} />
+            <Badge x={center} y={topY} color="#0ea5e9" label={`Overall Rank: #1 of 5`} />
+
+            {/* Above pair brackets */}
+            <Line x1={c1 + AV/2} x2={c2 - AV/2} y={abovePairY} />
+            <Badge x={(c1 + c2)/2} y={abovePairY - 16} color="#22c55e" label={`L–M ${t.scores.pairLM.toFixed(2)}`} />
+            <Line x1={c2 + AV/2} x2={c3 - AV/2} y={abovePairY} />
+            <Badge x={(c2 + c3)/2} y={abovePairY - 16} color="#22c55e" label={`M–R ${t.scores.pairMR.toFixed(2)}`} />
+
+            {/* Below pair brackets */}
+            <Line x1={c1 + AV/2} x2={c2 - AV/2} y={belowPairY} />
+            <Badge x={(c1 + c2)/2} y={belowPairY + 16} color="#22c55e" label={`L–M ${t.scores.pairLM.toFixed(2)}`} />
+            <Line x1={c2 + AV/2} x2={c3 - AV/2} y={belowPairY} />
+            <Badge x={(c2 + c3)/2} y={belowPairY + 16} color="#22c55e" label={`M–R ${t.scores.pairMR.toFixed(2)}`} />
+
+            {/* Wide triadic bracket under all three */}
+            <Line x1={c1 - AV/3} x2={c3 + AV/3} y={triadicY} />
+            <Badge x={center} y={triadicY + 18} color="#3b82f6" label={`Triadic Closure ${t.scores.triadicClosure.toFixed(2)} • Fan-In ${Math.round(t.scores.fanIn)}pctl`} />
+
+            {/* Left relevance vertical bracket */}
+            <VLine x={leftBracketX} y1={topY} y2={bottomY} />
+            <Badge x={leftBracketX - 4} y={(topY + bottomY)/2} color="#64748b" label={`Relevance Index`} />
+
+            {/* Right overall triple score vertical bracket */}
+            <VLine x={rightBracketX} y1={topY} y2={bottomY} />
+            <Badge x={rightBracketX + 4} y={(topY + bottomY)/2} color="#111827" label={`Triple Score`} />
+          </svg>
+
+          {/* Avatars row */}
+          <div style={{ height:200 }} />
+          <div style={{ position:'absolute', left:0, right:0, top:avatarY - AV/2, display:'flex', justifyContent:'center', gap:GAP }}>
+            {[t.left, t.middle, t.right].map((p,i)=> (
+              <div key={i} style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8 }}>
+                <img src={p.avatarUrl} alt={p.name} style={{ width:AV, height:AV, borderRadius:'50%', objectFit:'cover', boxShadow:'0 10px 26px rgba(0,0,0,0.25)', border:'2px solid rgba(255,255,255,0.95)' }} />
+                <div style={{ fontSize:13, fontWeight:600, color:'#0b122a' }}>{p.name}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Center badges for symmetry and opportunity fit */}
+          <div style={{ position:'absolute', left:0, right:0, top:avatarY + AV/2 + 6, display:'flex', justifyContent:'center', gap:10 }}>
+            <Pill color={symmetryColor} label="Transactional" value={symbolizeSymmetry(t.scores.transactionalSymmetry)} />
+            <Pill color="#6d28d9" label="Opportunity Fit" value={`${Math.round(t.scores.opportunityFit)}%`} />
+          </div>
         </div>
       </div>
     );

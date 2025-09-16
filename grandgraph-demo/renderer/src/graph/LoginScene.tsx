@@ -29,7 +29,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
   const cfg = {
     particleCount: 200000,
     clusterCount: 9,
-    pointSizePx: 10.2,
+    pointSizePx: 7.0,
     baseColor: [0.70, 0.62, 0.94] as [number, number, number],
     background: [0.04, 0.04, 0.07] as [number, number, number],
     glow: 0.95,
@@ -91,10 +91,13 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
       const z = 2 * v - 1, r = Math.sqrt(Math.max(0, 1 - z * z)), phi = 2 * Math.PI * u;
       return [r * Math.cos(phi), r * Math.sin(phi), z] as const;
     }
-    // Simple 3D noise for shell holes
+    // Multi-octave 3D noise for larger, irregular shell holes
     function noise3d(x: number, y: number, z: number) {
-      const p = Math.sin(x * 7.3 + y * 5.1 + z * 9.7) * Math.cos(x * 3.2 + y * 8.4 + z * 2.9);
-      return (p + 1) * 0.5; // 0..1
+      // Lower frequency for bigger chunks
+      const n1 = Math.sin(x * 2.1 + y * 1.7 + z * 2.8) * Math.cos(x * 1.5 + y * 2.9 + z * 1.3);
+      const n2 = Math.sin(x * 4.2 + y * 3.4 + z * 5.6) * Math.cos(x * 3.0 + y * 5.8 + z * 2.6);
+      const combined = n1 * 0.7 + n2 * 0.3; // Mix scales for irregular chunks
+      return (combined + 1) * 0.5; // 0..1
     }
     // smooth radius samplers (no shells!)
     function radiusCore() { return 0.02 + 0.18 * Math.pow(Math.random(), 1.6); }
@@ -141,9 +144,9 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
           } else if (u < wCore + wClusterSmall + wClusterMid + wClusterFull + wShell) {
             const d = uniformDir(); const R = radiusShell(); 
             const px = d[0] * R, py = d[1] * R, pz = d[2] * R;
-            // Punch holes in the shell using 3D noise
-            const holeNoise = noise3d(px * 4, py * 4, pz * 4);
-            const holeThreshold = 0.35; // larger = more holes
+            // Punch larger, irregular holes in the shell using 3D noise
+            const holeNoise = noise3d(px * 3, py * 3, pz * 3);
+            const holeThreshold = 0.55; // larger = more holes, bigger chunks missing
             if (holeNoise < holeThreshold) {
               // Skip this shell particle (creates hole)
               const fallbackD = uniformDir(); const fallbackR = 0.5 + 0.3 * Math.random();
