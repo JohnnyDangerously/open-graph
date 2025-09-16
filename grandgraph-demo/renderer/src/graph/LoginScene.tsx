@@ -472,9 +472,15 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
 
   return (
     <div style={{ position: 'absolute', inset: 0 }}>
+      <style>{`
+        @keyframes shimmer {
+          0% { left: -100%; }
+          100% { left: 100%; }
+        }
+      `}</style>
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
       {/* Wordmark + button stack */}
-      <div style={{ position:'absolute', left:'35%', top:'75%', transform:'translate(-50%, -50%)', zIndex:1000, color:'#fff', textAlign:'left' as const }}>
+      <div style={{ position:'absolute', left:'25%', top:'80%', transform:'translate(-50%, -50%)', zIndex:1000, color:'#fff', textAlign:'left' as const }}>
         <div style={{ fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace', opacity:0.9, letterSpacing:1.2, fontSize:70, lineHeight:1 }}>
           <Typewriter text="vector" />
         </div>
@@ -484,23 +490,53 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
             onClick={(e: React.MouseEvent<HTMLButtonElement>)=>{ e.preventDefault(); e.stopPropagation(); }}
             disabled={startedRef.current}
             style={{
-              marginTop: 16,
-              padding: '10px 22px',
-              background: '#ffffff',
-              color: '#111',
-              border: '1px solid rgba(255,255,255,0.9)',
-              borderRadius: 12,
+              marginTop: 20,
+              padding: '14px 32px',
+              background: 'linear-gradient(145deg, rgba(255,255,255,0.15), rgba(255,255,255,0.05))',
+              color: '#ffffff',
+              border: '1px solid rgba(255,255,255,0.25)',
+              borderRadius: 16,
               cursor: 'pointer',
-              boxShadow: '0 10px 30px rgba(255,255,255,0.07), 0 3px 10px rgba(0,0,0,0.3)',
-              fontWeight: 700,
-              letterSpacing: 0.4,
-              fontSize: 16,
-              transition: 'transform 160ms ease, box-shadow 160ms ease',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)',
+              fontWeight: 600,
+              letterSpacing: 1.5,
+              fontSize: 14,
+              textTransform: 'uppercase' as const,
+              fontFamily: 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+              backdropFilter: 'blur(12px)',
+              WebkitBackdropFilter: 'blur(12px)',
+              transition: 'all 200ms cubic-bezier(0.4, 0, 0.2, 1)',
+              position: 'relative' as const,
+              overflow: 'hidden' as const,
             }}
-            onMouseEnter={(e: any)=>{ e.currentTarget.style.transform='scale(1.04)'; }}
-            onMouseLeave={(e: any)=>{ e.currentTarget.style.transform='scale(1.0)'; }}
+            onMouseEnter={(e: any)=>{ 
+              e.currentTarget.style.transform='scale(1.05) translateY(-1px)'; 
+              e.currentTarget.style.boxShadow='0 12px 40px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.3)';
+              e.currentTarget.style.background='linear-gradient(145deg, rgba(255,255,255,0.2), rgba(255,255,255,0.08))';
+            }}
+            onMouseLeave={(e: any)=>{ 
+              e.currentTarget.style.transform='scale(1.0) translateY(0px)'; 
+              e.currentTarget.style.boxShadow='0 8px 32px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)';
+              e.currentTarget.style.background='linear-gradient(145deg, rgba(255,255,255,0.15), rgba(255,255,255,0.05))';
+            }}
+            onMouseDown={(e: any)=>{ 
+              e.currentTarget.style.transform='scale(0.98) translateY(1px)'; 
+            }}
+            onMouseUp={(e: any)=>{ 
+              e.currentTarget.style.transform='scale(1.05) translateY(-1px)'; 
+            }}
           >
-            Connect
+            <span style={{ position: 'relative', zIndex: 1 }}>Connect</span>
+            <div style={{
+              position: 'absolute',
+              top: 0,
+              left: '-100%',
+              width: '100%',
+              height: '100%',
+              background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent)',
+              animation: 'shimmer 2s infinite',
+              zIndex: 0
+            }} />
           </button>
         )}
       </div>

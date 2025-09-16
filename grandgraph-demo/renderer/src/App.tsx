@@ -7,6 +7,7 @@ import Sidebar from "./ui/Sidebar";
 import { setApiConfig } from "./api";
 import { resolveSmart, loadTileSmart } from "./smart";
 import TriplesModal from "./ui/TriplesModal";
+import MobilitySankeyDemo from "./ui/MobilitySankeyDemo";
 
 type SceneRef = { setForeground: (fg: any) => void; clear: () => void };
 
@@ -30,6 +31,7 @@ export default function App(){
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [concentric, setConcentric] = useState(false);
   const [showTriples, setShowTriples] = useState(false);
+  const [showMobility, setShowMobility] = useState(false);
 
   const demoTriples = React.useMemo(()=>{
     const person = (name:string, title?:string)=>({ name, title, avatarUrl:`https://api.dicebear.com/7.x/thumbs/svg?seed=${encodeURIComponent(name)}` })
@@ -94,8 +96,9 @@ export default function App(){
       <Sidebar open={sidebarOpen} onToggle={()=>setSidebarOpen(!sidebarOpen)} items={Array.from({length: Math.max(0,nodeCount)},(_,i)=>({index:i, group: (i%8)}))} onSelect={(i)=>{/* future: refocus */}} />
       <CommandBar onRun={run} />
       <HUD focus={focus} nodes={nodeCount} fps={fps} selectedIndex={selectedIndex} concentric={concentric} onToggleConcentric={()=>setConcentric(c=>!c)} onSettings={()=>setShowSettings(true)} onBack={()=>{ if(cursor>0){ const id=history[cursor-1]; setCursor(cursor-1); run(id) } }} onForward={()=>{ if(cursor<history.length-1){ const id=history[cursor+1]; setCursor(cursor+1); run(id) } }} canBack={cursor>0} canForward={cursor<history.length-1} filters={filters} onToggleFilter={(k)=>setFilters(f=>({ ...f, [k]: !f[k] }))} />
-      <div style={{ position:'absolute', left:0, right:0, bottom:18, display:'grid', placeItems:'center', zIndex:15 }}>
+      <div style={{ position:'absolute', left:0, right:0, bottom:18, display:'flex', justifyContent:'center', gap:12, zIndex:15 }}>
         <button onClick={()=>setShowTriples(true)} style={{ padding:'12px 16px', borderRadius:14, background:'#ffffff', color:'#0b122a', border:'1px solid rgba(255,255,255,0.25)', boxShadow:'0 14px 40px rgba(11,18,42,0.45)' }}>Show Triples</button>
+        <button onClick={()=>setShowMobility(true)} style={{ padding:'12px 16px', borderRadius:14, background:'linear-gradient(135deg, #ff6a00, #ff3b3b)', color:'#ffffff', border:'1px solid rgba(255,255,255,0.25)', boxShadow:'0 14px 40px rgba(255,106,0,0.3)' }}>People Movin'</button>
       </div>
       {err && (
         <div style={{ position:'absolute', top:52, left:12, right:12, padding:'10px 12px', background:'rgba(200,40,60,0.2)', border:'1px solid rgba(255,80,100,0.35)', color:'#ffbfc9', borderRadius:10, zIndex:11 }}>
@@ -107,6 +110,16 @@ export default function App(){
       )}
       {showTriples && (
         <TriplesModal open={showTriples} onClose={()=>setShowTriples(false)} triples={demoTriples} />
+      )}
+      {showMobility && (
+        <div style={{ position:'absolute', inset:0, background:'rgba(2,6,23,0.8)', display:'grid', placeItems:'center', zIndex:40 }}>
+          <div style={{ width:'95vw', height:'95vh', maxWidth:1200, maxHeight:900, borderRadius:24, background:'#0b0c10', border:'1px solid rgba(255,255,255,0.08)', boxShadow:'0 28px 120px rgba(0,0,0,0.6)', overflow:'hidden' }}>
+            <div style={{ position:'absolute', top:16, right:16, zIndex:10 }}>
+              <button onClick={()=>setShowMobility(false)} style={{ padding:'8px 12px', borderRadius:8, background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.2)', fontSize:14 }}>Close</button>
+            </div>
+            <MobilitySankeyDemo />
+          </div>
+        </div>
       )}
     </div>
   );
