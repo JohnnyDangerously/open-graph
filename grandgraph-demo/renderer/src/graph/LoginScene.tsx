@@ -93,11 +93,13 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     // smooth radius samplers (no shells!)
     function radiusCore() { return 0.02 + 0.18 * Math.pow(Math.random(), 1.6); }
     function radiusBody() { return 0.30 + 0.60 * Math.pow(Math.random(), 0.9); }
-    function radiusShell() { return 0.92 + 0.08 * Math.pow(Math.random(), 2.4); }
+    // Sanity check: push shell to very near the boundary
+    function radiusShell() { return 0.97 + 0.03 * Math.pow(Math.random(), 3.0); }
 
     // mixture weights (soft)
     // Increase shell presence for visible outer halo of dots
-    const wCore = 0.10, wClusterSmall = 0.20, wClusterMid = 0.18, wClusterFull = 0.20, wShell = 0.26, wDust = 0.06;
+    // Sanity check: 5x outer shell weight to visibly dominate
+    const wCore = 0.08, wClusterSmall = 0.14, wClusterMid = 0.12, wClusterFull = 0.16, wShell = 1.30, wDust = 0.04;
     const wSum = wCore + wClusterSmall + wClusterMid + wClusterFull + wShell + wDust;
     function fillRange(start: number, end: number){
       for (let i = start; i < end; i++) {
@@ -224,8 +226,8 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
         gl_Position = vec4(clip, 0.0, 1.0);
         gl_PointSize = u_pointPx;
         // Boost alpha slightly for near-shell samples (approx via projected length)
-        float shellBoost = smoothstep(0.65, 0.98, length(p));
-        v_alpha = (0.10 + 0.20 * hash11(a_seed*9.9)) * (u_glow + 0.15 * shellBoost);
+        float shellBoost = smoothstep(0.80, 0.985, length(p));
+        v_alpha = (0.12 + 0.22 * hash11(a_seed*9.9)) * (u_glow + 0.50 * shellBoost);
       }
       `,
       frag: `
