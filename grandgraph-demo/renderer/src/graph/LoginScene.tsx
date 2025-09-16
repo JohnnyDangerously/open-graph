@@ -188,18 +188,21 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
       void main(){
         vec2 center = 0.5 * u_view;
         float d = length(v_uv - center);
-        float ring = exp(-pow((d - u_radiusPx) / max(1.0, u_thicknessPx), 2.0));
-        float grain = 0.6 + 0.4 * hash(v_uv * 0.75);
-        float a = u_alpha * ring * grain;
+        // crisp ring band using smoothstep, plus very soft center glow
+        float delta = abs(d - u_radiusPx);
+        float band = 1.0 - smoothstep(u_thicknessPx, u_thicknessPx*2.2, delta);
+        float glow = exp(-pow(d/(u_radiusPx*0.55), 2.0));
+        float grain = 0.7 + 0.3 * hash(v_uv * 0.9);
+        float a = u_alpha * (band * 0.85 + glow * 0.15) * grain;
         gl_FragColor = vec4(u_color, a);
       }`,
       attributes: { a_pos: { buffer: quad, size: 2 } },
       uniforms: {
         u_view: ({ viewportWidth, viewportHeight }: any) => [viewportWidth, viewportHeight],
         u_color: () => cfg.baseColor,
-        u_radiusPx: ({ viewportWidth, viewportHeight }: any) => 0.48 * Math.min(viewportWidth, viewportHeight),
-        u_thicknessPx: ({ viewportWidth, viewportHeight }: any) => 0.02 * Math.min(viewportWidth, viewportHeight),
-        u_alpha: () => 0.12,
+        u_radiusPx: ({ viewportWidth, viewportHeight }: any) => 0.46 * Math.min(viewportWidth, viewportHeight),
+        u_thicknessPx: ({ viewportWidth, viewportHeight }: any) => 0.008 * Math.min(viewportWidth, viewportHeight),
+        u_alpha: () => 0.06,
       },
       primitive: 'triangle strip',
       count: 4,
