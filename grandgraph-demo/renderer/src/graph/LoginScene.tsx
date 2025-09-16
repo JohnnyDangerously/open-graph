@@ -193,6 +193,11 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     // --- buffers ---
     const posBuf = regl.buffer({ usage: 'dynamic', type: 'float', length: pos0.byteLength });
     const sedBuf = regl.buffer({ usage: 'dynamic', type: 'float', length: seed.byteLength });
+    
+    // Simple edge system for sparse area fill
+    const MAX_EDGES = 800; // Keep low for performance
+    const edgeData = new Float32Array(MAX_EDGES * 6); // 2 points * 3 coords each
+    let edgeCount = 0;
     // screen-space quad for outer sphere ring
     const quad = regl.buffer(new Float32Array([
       -1, -1,
@@ -298,12 +303,52 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
       blend: { enable: true, func: { srcRGB: 'src alpha', srcAlpha: 'one', dstRGB: 'one minus src alpha', dstAlpha: 'one minus src alpha' } }
     });
 
+    // Simple edge renderer for sparse fill
+    const edgeBuf = regl.buffer({ usage: 'dynamic', type: 'float', length: edgeData.byteLength });
+    const drawEdges = regl({
+      vert: `
+      precision highp float;
+      attribute vec3 a_pos;
+      uniform float u_time, u_zoom;
+      uniform vec2 u_view;
+      uniform mat3 u_rot;
+      void main(){
+        float cy = cos(u_time*0.12), sy = sin(u_time*0.12);
+        mat3 ry = mat3(cy,0.0,sy, 0.0,1.0,0.0, -sy,0.0,cy);
+        vec3 pr = u_rot * (ry * a_pos);
+        float f = 1.0 / (1.0 + pr.z * 0.8);
+        vec2 screen = pr.xy * (u_zoom * f);
+        vec2 clip = (screen / (0.5 * u_view));
+        gl_Position = vec4(clip, 0.0, 1.0);
+      }`,
+      frag: `
+      precision highp float;
+      void main(){
+        gl_FragColor = vec4(0.5, 0.4, 0.7, 0.08);
+      }`,
+      attributes: { a_pos: { buffer: edgeBuf, size: 3 } },
+      uniforms: {
+        u_time: () => performance.now() / 1000,
+        u_zoom: () => zoomRef.current,
+        u_view: ({ viewportWidth, viewportHeight }: any) => [viewportWidth, viewportHeight],
+        u_rot: () => {
+          const c = Math.cos(tiltRef.current), s = Math.sin(tiltRef.current);
+          return [1, 0, 0, 0, c, -s, 0, s, c];
+        }
+      },
+      count: () => edgeCount * 2,
+      primitive: 'lines',
+      depth: { enable: false },
+      blend: { enable: true, func: { srcRGB: 'src alpha', srcAlpha: 'one', dstRGB: 'one minus src alpha', dstAlpha: 'one minus src alpha' } }
+    });
+
     // removed drawLines pass
 
     const loop = () => {
       regl.poll();
       regl.clear({ color: [cfg.background[0], cfg.background[1], cfg.background[2], 1] });
       drawOuter();
+      if (edgeCount > 0) drawEdges();
       draw();
       rafRef.current = requestAnimationFrame(loop);
     };
@@ -351,6 +396,34 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
       posBuf.subdata(pos0.subarray(3 * start, 3 * end), 3 * start * 4);
       sedBuf.subdata(seed.subarray(start, end), start * 4);
       filledRef.current = end;
+      
+      // Generate sparse edges when particles are complete
+      if (end >= N && edgeCount === 0) {
+        const SAMPLE_STEP = 800; // Sample every 800th particle for performance
+        const MAX_DIST = 0.15; // Max connection distance
+        let ei = 0;
+        
+        for (let i = 0; i < N && ei < MAX_EDGES; i += SAMPLE_STEP) {
+          const x1 = pos0[i * 3], y1 = pos0[i * 3 + 1], z1 = pos0[i * 3 + 2];
+          
+          for (let j = i + SAMPLE_STEP; j < Math.min(i + SAMPLE_STEP * 8, N) && ei < MAX_EDGES; j += SAMPLE_STEP) {
+            const x2 = pos0[j * 3], y2 = pos0[j * 3 + 1], z2 = pos0[j * 3 + 2];
+            const dist = Math.sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1) + (z2-z1)*(z2-z1));
+            
+            if (dist < MAX_DIST && Math.random() < 0.3) { // 30% chance for sparse connections
+              edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
+              edgeData[ei * 6 + 3] = x2; edgeData[ei * 6 + 4] = y2; edgeData[ei * 6 + 5] = z2;
+              ei++;
+            }
+          }
+        }
+        
+        edgeCount = ei;
+        if (edgeCount > 0) {
+          edgeBuf.subdata(edgeData.subarray(0, edgeCount * 6));
+        }
+      }
+      
       if (end < N) scheduler(() => step(end));
     };
     scheduler(() => step(0));
