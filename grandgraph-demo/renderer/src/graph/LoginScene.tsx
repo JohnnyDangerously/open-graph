@@ -27,9 +27,9 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
   const filledRef = useRef(0); // number of points currently generated
 
   const cfg = {
-    particleCount: 360000,
+    particleCount: 200000,
     clusterCount: 9,
-    pointSizePx: 2.9,
+    pointSizePx: 3.4,
     baseColor: [0.70, 0.62, 0.94] as [number, number, number],
     background: [0.04, 0.04, 0.07] as [number, number, number],
     glow: 0.95,
@@ -47,9 +47,8 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     if (!canvas) return;
 
     // --- data (300k points, generated in chunks to avoid blocking) ---
-    // 5x density spike for visibility sanity-check
-    const DENSITY_MULTIPLIER = 5;
-    const N = Math.max(1, (cfg.particleCount | 0) * DENSITY_MULTIPLIER);
+    // Return to normal density for performance
+    const N = Math.max(1, (cfg.particleCount | 0));
     const pos0 = new Float32Array(N * 3);
     const seed = new Float32Array(N);
 
@@ -95,13 +94,13 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     // smooth radius samplers (no shells!)
     function radiusCore() { return 0.02 + 0.18 * Math.pow(Math.random(), 1.6); }
     function radiusBody() { return 0.30 + 0.60 * Math.pow(Math.random(), 0.9); }
-    // Sanity check: push shell to very near the boundary
-    function radiusShell() { return 0.97 + 0.03 * Math.pow(Math.random(), 3.0); }
+    // Dial shell back to a gentle outer halo
+    function radiusShell() { return 0.90 + 0.10 * Math.pow(Math.random(), 2.2); }
 
     // mixture weights (soft)
     // Increase shell presence for visible outer halo of dots
-    // Double internal cluster weights for tunability check
-    const wCore = 0.08, wClusterSmall = 0.28, wClusterMid = 0.24, wClusterFull = 0.32, wShell = 1.30, wDust = 0.04;
+    // Balanced weights (no spike)
+    const wCore = 0.12, wClusterSmall = 0.22, wClusterMid = 0.20, wClusterFull = 0.22, wShell = 0.18, wDust = 0.06;
     const wSum = wCore + wClusterSmall + wClusterMid + wClusterFull + wShell + wDust;
     function fillRange(start: number, end: number){
       for (let i = start; i < end; i++) {
@@ -228,8 +227,8 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
         gl_Position = vec4(clip, 0.0, 1.0);
         gl_PointSize = u_pointPx;
         // Boost alpha slightly for near-shell samples (approx via projected length)
-        float shellBoost = smoothstep(0.80, 0.985, length(p));
-        v_alpha = (0.12 + 0.22 * hash11(a_seed*9.9)) * (u_glow + 0.50 * shellBoost);
+        float shellBoost = smoothstep(0.80, 0.98, length(p));
+        v_alpha = (0.12 + 0.22 * hash11(a_seed*9.9)) * (u_glow + 0.20 * shellBoost);
       }
       `,
       frag: `
