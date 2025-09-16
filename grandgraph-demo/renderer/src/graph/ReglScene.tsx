@@ -101,6 +101,7 @@ const ReglScene = forwardRef<Exposed>(function ReglScene(_props: Props, ref){
   const pickedRef = useRef<number | null>(null)
   const glowMeshRef = useRef<{ bufs:any, count:number } | null>(null)
   const originalPosRef = useRef<Float32Array | null>(null)
+  const rafRef = useRef<number>(0)
   const edgeCountRef = useRef<number>(0)
   const timeRef = useRef(0)
 
@@ -244,7 +245,11 @@ const ReglScene = forwardRef<Exposed>(function ReglScene(_props: Props, ref){
       frag: `
       precision highp float; varying float v_l; uniform float u_alpha;
       void main(){ float fall = exp(-4.0 * v_l * v_l); gl_FragColor = vec4(1.0,0.85,0.35, u_alpha * fall); }`,
-      attributes: { a_pos: regl.prop('bufs.bufPos'), a_other: regl.prop('bufs.bufOther'), a_side: regl.prop('bufs.bufSide') },
+      attributes: {
+        a_pos: (_: any, p: any) => p.bufs.bufPos,
+        a_other: (_: any, p: any) => p.bufs.bufOther,
+        a_side: (_: any, p: any) => p.bufs.bufSide,
+      },
       uniforms: {
         u_scale: () => cameraRef.current.zoom * (Math.min(canvasRef.current!.width, canvasRef.current!.height) / 2),
         u_translate: () => [ (cameraRef.current.offset[0]*0.5+0.5) * canvasRef.current!.width, (cameraRef.current.offset[1]*0.5+0.5) * canvasRef.current!.height ],
@@ -279,7 +284,7 @@ const ReglScene = forwardRef<Exposed>(function ReglScene(_props: Props, ref){
         const gm = glowMeshRef.current
         if (gm && gm.count) {
           const show = (cameraRef.current.zoom > 0.9) || (gm.count <= 6000*6)
-          if (show) (regl as any).framebuffer ? drawEdgesGlow(gm) : drawEdgesGlow(gm)
+          if (show) drawEdgesGlow(gm)
         }
       }
       frames++
@@ -289,7 +294,7 @@ const ReglScene = forwardRef<Exposed>(function ReglScene(_props: Props, ref){
         frames = 0; lastReport = now
         try { props.onStats?.(fps, tileRef.current?.count ?? 0) } catch {}
       }
-      requestAnimationFrame(frame)
+      rafRef.current = requestAnimationFrame(frame)
     }
 
     function applySize(){
@@ -357,25 +362,31 @@ const ReglScene = forwardRef<Exposed>(function ReglScene(_props: Props, ref){
       lastX = e.clientX; lastY = e.clientY
       setCamera((c) => ({ ...c, offset: [c.offset[0] + dx, c.offset[1] - dy] as [number, number] }))
     })
-    canvas.addEventListener('wheel', (e) => {
+    const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      const z = Math.max(0.5, Math.min(2.5, camera.zoom * (e.deltaY > 0 ? 0.9 : 1.1)))
-      setCamera((c) => ({ ...c, zoom: z }))
-    }, { passive: false })
+      const sign = e.deltaY > 0 ? 0.9 : 1.1
+      setCamera((c) => ({ ...c, zoom: Math.max(0.5, Math.min(2.5, c.zoom * sign)) }))
+    }
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    window.addEventListener('wheel', onWheel, { passive: false })
 
     frame()
 
     return () => {
       window.removeEventListener('resize', applySize)
+      try { cancelAnimationFrame(rafRef.current) } catch {}
       canvas.removeEventListener('mousedown', onDown as any)
       canvas.removeEventListener('mouseup', onUp as any)
       window.removeEventListener('keydown', onKey)
+      try { window.removeEventListener('wheel', onWheel as any) } catch {}
+      try { canvas.removeEventListener('wheel', onWheel as any) } catch {}
       try { ro && ro.disconnect() } catch {}
       fgPositionRef.current?.destroy?.()
       fgSizeRef.current?.destroy?.()
       fgAlphaRef.current?.destroy?.()
       fgSeedRef.current?.destroy?.()
       edgePosRef.current?.destroy?.()
+      try { if (glowMeshRef.current) { glowMeshRef.current.bufs.bufPos.destroy?.(); glowMeshRef.current.bufs.bufOther.destroy?.(); glowMeshRef.current.bufs.bufSide.destroy?.(); } } catch {}
       regl.destroy()
     }
   }, [bg.alpha, bg.count, bg.nodes, bg.size])

@@ -4,8 +4,8 @@ export default function Sidebar({ open=true, onToggle, items, onSelect }:{ open?
   const [isOpen, setIsOpen] = useState(open)
   const toggle = ()=>{ setIsOpen(!isOpen); onToggle() }
   return (
-    <div style={{ position:'absolute', top:0, right:0, height:'100%', width: isOpen ? 320 : 32, transition:'width 160ms ease', zIndex:15 }}>
-      <div onClick={toggle} title={isOpen?"Collapse":"Expand"} style={{ position:'absolute', left:0, top:10, width:28, height:28, borderRadius:6, background:'rgba(255,255,255,0.08)', color:'#fff', display:'grid', placeItems:'center', cursor:'pointer', border:'1px solid rgba(255,255,255,0.12)' }}>{isOpen?'>':'<'}</div>
+    <div style={{ position:'absolute', top:0, right:0, height:'100%', width: isOpen ? 320 : 32, transition:'width 160ms ease', zIndex:30 }}>
+      <div onClick={toggle} title={isOpen?"Collapse":"Expand"} style={{ position:'absolute', left:0, top:56, width:32, height:32, borderRadius:8, background:'rgba(255,255,255,0.12)', color:'#fff', display:'grid', placeItems:'center', cursor:'pointer', border:'1px solid rgba(255,255,255,0.2)', boxShadow:'0 6px 20px rgba(0,0,0,0.35)', zIndex: 100 }}>{isOpen?'❯':'❮'}</div>
       {isOpen && (
         <div style={{ position:'absolute', right:0, top:0, bottom:0, width:320, padding:'42px 12px 12px 12px', background:'rgba(12,14,22,0.9)', borderLeft:'1px solid rgba(255,255,255,0.08)', backdropFilter:'blur(8px)', color:'#fff', overflow:'auto' }}>
           <div style={{ fontSize:16, marginBottom:10, opacity:0.85 }}>Nodes</div>

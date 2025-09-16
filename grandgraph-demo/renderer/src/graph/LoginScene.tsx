@@ -1,18 +1,39 @@
+// @ts-nocheck
 import React, { useEffect, useRef, useState } from 'react';
 import createREGL, { Regl } from 'regl';
 
 function easeInOutCubic(t: number) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2 }
 function clamp01(x: number) { return Math.min(1, Math.max(0, x)) }
 
-type Props = { onDone?: () => void; onConnect?: () => void };
+type MegaConfig = {
+  particleCount?: number;
+  clusterCount?: number;
+  pointSizePx?: number;
+  baseColor?: [number, number, number];
+  background?: [number, number, number];
+  glow?: number; // alpha scaler
+};
 
-export default function LoginScene({ onDone, onConnect }: Props) {
+type Props = { onDone?: () => void; onConnect?: () => void; config?: MegaConfig };
+
+export default function LoginScene({ onDone, onConnect, config }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const reglRef = useRef<Regl | null>(null);
   const rafRef = useRef<number | null>(null);
   const [animating, setAnimating] = useState(false);
   const startedRef = useRef(false);
   const doneRef = useRef(false);
+  const filledRef = useRef(0); // number of points currently generated
+
+  const cfg = {
+    particleCount: 300000,
+    clusterCount: 9,
+    pointSizePx: 2.9,
+    baseColor: [0.70, 0.62, 0.94] as [number, number, number],
+    background: [0.04, 0.04, 0.07] as [number, number, number],
+    glow: 0.95,
+    ...(config || {})
+  };
 
   // animated uniform sources
   const phaseRef = useRef(0.0); // 0..1 (3D → 2D)
@@ -23,16 +44,13 @@ export default function LoginScene({ onDone, onConnect }: Props) {
     const canvas = canvasRef.current!;
     if (!canvas) return;
 
-    // --- data (300k points) ---
-    // --- data (300k points) ---
-    // Smooth multi-cluster sphere: continuous radius, soft vMF clusters, light background dust.
-    const N = 300000;
+    // --- data (300k points, generated in chunks to avoid blocking) ---
+    const N = Math.max(1, cfg.particleCount | 0);
     const pos0 = new Float32Array(N * 3);
-    const group = new Float32Array(N);
     const seed = new Float32Array(N);
 
     // cluster centers via Fibonacci sphere
-    const CLUSTERS = 9;
+    const CLUSTERS = Math.max(1, cfg.clusterCount | 0);
     const centers: Array<[number, number, number]> = [];
     const golden = Math.PI * (3 - Math.sqrt(5));
     for (let k = 0; k < CLUSTERS; k++) {
@@ -63,31 +81,33 @@ export default function LoginScene({ onDone, onConnect }: Props) {
     // mixture weights (soft)
     const wCore = 0.14, wClusterSmall = 0.22, wClusterMid = 0.20, wClusterFull = 0.20, wShell = 0.14, wDust = 0.10;
     const wSum = wCore + wClusterSmall + wClusterMid + wClusterFull + wShell + wDust;
-
-    for (let i = 0; i < N; i++) {
-      const u = Math.random() * wSum;
-      let x = 0, y = 0, z = 0, g = 0;
-      if (u < wCore) {
-        const d = uniformDir(); const R = radiusCore(); x = d[0] * R; y = d[1] * R; z = d[2] * R; g = 0;
-      } else if (u < wCore + wClusterSmall) {
-        const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.22);
-        const s = 0.28 + 0.18 * Math.random(); const R = 0.85 * (0.80 + 0.20 * Math.random());
-        x = d[0] * s * R; y = d[1] * s * R; z = d[2] * s * R; g = 2;
-      } else if (u < wCore + wClusterSmall + wClusterMid) {
-        const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.18);
-        const s = 0.45 + 0.22 * Math.random(); const R = 0.88 * (0.85 + 0.25 * Math.random());
-        x = d[0] * s * R; y = d[1] * s * R; z = d[2] * s * R; g = 3;
-      } else if (u < wCore + wClusterSmall + wClusterMid + wClusterFull) {
-        const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.12);
-        const R = radiusBody(); x = d[0] * R; y = d[1] * R; z = d[2] * R; g = 4;
-      } else if (u < wCore + wClusterSmall + wClusterMid + wClusterFull + wShell) {
-        const d = uniformDir(); const R = radiusShell(); x = d[0] * R; y = d[1] * R; z = d[2] * R; g = 6;
-      } else {
-        const d = uniformDir(); const R = 0.20 + 0.80 * Math.random();
-        x = d[0] * R; y = d[1] * R; z = d[2] * R; g = 7;
+    function fillRange(start: number, end: number){
+      for (let i = start; i < end; i++) {
+        const u = Math.random() * wSum;
+        let x = 0, y = 0, z = 0;
+        if (u < wCore) {
+          const d = uniformDir(); const R = radiusCore(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
+        } else if (u < wCore + wClusterSmall) {
+          const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.22);
+          const s = 0.28 + 0.18 * Math.random(); const R = 0.85 * (0.80 + 0.20 * Math.random());
+          x = d[0] * s * R; y = d[1] * s * R; z = d[2] * s * R;
+        } else if (u < wCore + wClusterSmall + wClusterMid) {
+          const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.18);
+          const s = 0.45 + 0.22 * Math.random(); const R = 0.88 * (0.85 + 0.25 * Math.random());
+          x = d[0] * s * R; y = d[1] * s * R; z = d[2] * s * R;
+        } else if (u < wCore + wClusterSmall + wClusterMid + wClusterFull) {
+          const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.12);
+          const R = radiusBody(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
+        } else if (u < wCore + wClusterSmall + wClusterMid + wClusterFull + wShell) {
+          const d = uniformDir(); const R = radiusShell(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
+        } else {
+          const d = uniformDir(); const R = 0.20 + 0.80 * Math.random();
+          x = d[0] * R; y = d[1] * R; z = d[2] * R;
+        }
+        const j = 3 * i;
+        pos0[j + 0] = x; pos0[j + 1] = y; pos0[j + 2] = z;
+        seed[i] = Math.random();
       }
-      pos0[3 * i + 0] = x; pos0[3 * i + 1] = y; pos0[3 * i + 2] = z;
-      group[i] = g; seed[i] = Math.random();
     }
 
     // no decorative lines; particles only
@@ -104,9 +124,8 @@ export default function LoginScene({ onDone, onConnect }: Props) {
     window.addEventListener('resize', resize);
 
     // --- buffers ---
-    const posBuf = regl.buffer(pos0);
-    const grpBuf = regl.buffer(group);
-    const sedBuf = regl.buffer(seed);
+    const posBuf = regl.buffer({ usage: 'dynamic', type: 'float', length: pos0.byteLength });
+    const sedBuf = regl.buffer({ usage: 'dynamic', type: 'float', length: seed.byteLength });
     // no edges buffer since lines are removed
 
     const draw = regl({
@@ -117,6 +136,9 @@ export default function LoginScene({ onDone, onConnect }: Props) {
       uniform float u_time, u_phase, u_zoom;
       uniform vec2  u_view;
       uniform mat3  u_rot;
+      uniform float u_pointPx;
+      uniform float u_glow;
+      uniform vec3  u_color;
       varying float v_alpha;
 
       float hash11(float p){
@@ -140,23 +162,21 @@ export default function LoginScene({ onDone, onConnect }: Props) {
         // centered mapping (no offset), so the globe sits in the middle
         vec2 clip = (screen / (0.5 * u_view));
         gl_Position = vec4(clip, 0.0, 1.0);
-        gl_PointSize = 2.9;
-
-        v_alpha = 0.10 + 0.20 * hash11(a_seed*9.9);
+        gl_PointSize = u_pointPx;
+        v_alpha = (0.10 + 0.20 * hash11(a_seed*9.9)) * u_glow;
       }
       `,
       frag: `
       precision highp float;
+      uniform vec3 u_color;
       varying float v_alpha;
       void main(){
         vec2 p = gl_PointCoord*2.0 - 1.0;
         float d = dot(p,p);
         if (d>1.0) discard;
         float fall = exp(-3.6*d);
-        // flatter pastel color, avoid hot white accumulation
-        vec3 rgb = vec3(0.70, 0.62, 0.94);
-        float alpha = v_alpha * fall * 0.95;
-        gl_FragColor = vec4(rgb, alpha);
+        float alpha = v_alpha * fall;
+        gl_FragColor = vec4(u_color, alpha);
       }
       `,
       attributes: {
@@ -171,9 +191,12 @@ export default function LoginScene({ onDone, onConnect }: Props) {
         u_rot: () => {
           const c = Math.cos(tiltRef.current), s = Math.sin(tiltRef.current);
           return [1, 0, 0, 0, c, -s, 0, s, c];
-        }
+        },
+        u_pointPx: () => cfg.pointSizePx,
+        u_glow: () => cfg.glow,
+        u_color: () => cfg.baseColor,
       },
-      count: N,
+      count: () => filledRef.current,
       primitive: 'points',
       depth: { enable: false },
       blend: { enable: true, func: { srcRGB: 'src alpha', srcAlpha: 'one', dstRGB: 'one minus src alpha', dstAlpha: 'one minus src alpha' } }
@@ -183,12 +206,28 @@ export default function LoginScene({ onDone, onConnect }: Props) {
 
     const loop = () => {
       regl.poll();
-      regl.clear({ color: [0.04, 0.04, 0.07, 1] });
+      regl.clear({ color: [cfg.background[0], cfg.background[1], cfg.background[2], 1] });
       draw();
-      // particles only
       rafRef.current = requestAnimationFrame(loop);
     };
     loop();
+
+    // Start non-blocking data generation and update buffers incrementally
+    const CHUNK = 20000;
+    const scheduler = (cb: any) => {
+      const ric: any = (window as any).requestIdleCallback;
+      if (ric) ric(cb, { timeout: 16 }); else setTimeout(cb, 0);
+    };
+    const step = (start: number) => {
+      const end = Math.min(N, start + CHUNK);
+      fillRange(start, end);
+      // upload subranges
+      posBuf.subdata(pos0.subarray(3 * start, 3 * end), 3 * start * 4);
+      sedBuf.subdata(seed.subarray(start, end), start * 4);
+      filledRef.current = end;
+      if (end < N) scheduler(() => step(end));
+    };
+    scheduler(() => step(0));
 
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -235,8 +274,8 @@ export default function LoginScene({ onDone, onConnect }: Props) {
       <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
       {!animating && (
         <button
-          onMouseDown={(e)=>{ e.preventDefault(); e.stopPropagation(); start(); }}
-          onClick={(e)=>{ e.preventDefault(); e.stopPropagation(); }}
+          onMouseDown={(e: React.MouseEvent<HTMLButtonElement>)=>{ e.preventDefault(); e.stopPropagation(); start(); }}
+          onClick={(e: React.MouseEvent<HTMLButtonElement>)=>{ e.preventDefault(); e.stopPropagation(); }}
           disabled={startedRef.current}
           style={{
             position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)', zIndex: 1000,

@@ -44,3 +44,4 @@ venv/
 
 # Misc
 .tmp_remote/
+.aws

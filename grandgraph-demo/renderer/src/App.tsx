@@ -27,6 +27,7 @@ export default function App(){
     try { return localStorage.getItem('API_BEARER') || "" } catch { return "" }
   });
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [concentric, setConcentric] = useState(false);
 
   async function run(cmd: string){
     const s = cmd.trim();
@@ -49,11 +50,11 @@ export default function App(){
   }
 
   return (
-    <div className="w-full h-full" style={{ background: "#0a0a12", color: "white", position:'fixed', inset:0 }}>
-      <ReglScene ref={sceneRef as any} onPick={(i)=>{ setSelectedIndex(i) }} onClear={()=>{ sceneRef.current?.clear(); setFocus(null); }} onStats={(fps,count)=>{ setFps(fps); setNodeCount(count) }} />
+    <div className="w-full h-full" style={{ background: "#0a0a12", color: "white", position:'fixed', inset:0, overflow:'hidden' }}>
+      <ReglScene ref={sceneRef as any} concentric={concentric} onPick={(i)=>{ setSelectedIndex(i) }} onClear={()=>{ sceneRef.current?.clear(); setFocus(null); }} onStats={(fps,count)=>{ setFps(fps); setNodeCount(count) }} />
       <Sidebar open={sidebarOpen} onToggle={()=>setSidebarOpen(!sidebarOpen)} items={Array.from({length: Math.max(0,nodeCount)},(_,i)=>({index:i, group: (i%8)}))} onSelect={(i)=>{/* future: refocus */}} />
       <CommandBar onRun={run} />
-      <HUD focus={focus} nodes={nodeCount} fps={fps} selectedIndex={selectedIndex} onSettings={()=>setShowSettings(true)} onBack={()=>{ if(cursor>0){ const id=history[cursor-1]; setCursor(cursor-1); run(id) } }} onForward={()=>{ if(cursor<history.length-1){ const id=history[cursor+1]; setCursor(cursor+1); run(id) } }} canBack={cursor>0} canForward={cursor<history.length-1} filters={filters} onToggleFilter={(k)=>setFilters(f=>({ ...f, [k]: !f[k] }))} />
+      <HUD focus={focus} nodes={nodeCount} fps={fps} selectedIndex={selectedIndex} concentric={concentric} onToggleConcentric={()=>setConcentric(c=>!c)} onSettings={()=>setShowSettings(true)} onBack={()=>{ if(cursor>0){ const id=history[cursor-1]; setCursor(cursor-1); run(id) } }} onForward={()=>{ if(cursor<history.length-1){ const id=history[cursor+1]; setCursor(cursor+1); run(id) } }} canBack={cursor>0} canForward={cursor<history.length-1} filters={filters} onToggleFilter={(k)=>setFilters(f=>({ ...f, [k]: !f[k] }))} />
       {err && (
         <div style={{ position:'absolute', top:52, left:12, right:12, padding:'10px 12px', background:'rgba(200,40,60,0.2)', border:'1px solid rgba(255,80,100,0.35)', color:'#ffbfc9', borderRadius:10, zIndex:11 }}>
           {err}
