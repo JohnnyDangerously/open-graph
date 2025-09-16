@@ -279,14 +279,59 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
           disabled={startedRef.current}
           style={{
             position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)', zIndex: 1000,
-            padding: '12px 24px', background: 'rgba(255,255,255,0.08)', color: '#fff',
-            border: '1px solid rgba(255,255,255,0.2)', borderRadius: 10, cursor: 'pointer'
+            padding: '14px 28px',
+            background: 'linear-gradient(180deg, rgba(135,124,255,0.85), rgba(255,134,219,0.85))',
+            color: '#0b0b12',
+            border: '1px solid rgba(255,255,255,0.35)',
+            borderRadius: 14,
+            cursor: 'pointer',
+            boxShadow: '0 8px 30px rgba(186,128,255,0.35), 0 2px 8px rgba(0,0,0,0.35)',
+            fontWeight: 700,
+            letterSpacing: 0.6,
+            fontSize: 18,
+            backdropFilter: 'blur(3px)',
+            transition: 'transform 180ms ease, box-shadow 180ms ease, filter 180ms ease',
+            outline: '2px solid rgba(255,255,255,0.18)'
           }}
+          onMouseEnter={(e: any)=>{ e.currentTarget.style.transform='translate(-50%,-50%) scale(1.04)'; e.currentTarget.style.boxShadow='0 10px 36px rgba(200,150,255,0.45), 0 3px 10px rgba(0,0,0,0.4)'; }}
+          onMouseLeave={(e: any)=>{ e.currentTarget.style.transform='translate(-50%,-50%) scale(1.0)'; e.currentTarget.style.boxShadow='0 8px 30px rgba(186,128,255,0.35), 0 2px 8px rgba(0,0,0,0.35)'; }}
+          onFocus={(e: any)=>{ e.currentTarget.style.filter='brightness(1.05)'; }}
+          onBlur={(e: any)=>{ e.currentTarget.style.filter='none'; }}
         >
           Connect
         </button>
       )}
+
+      {/* bottom-right typing: "vector" with blinking underscore */}
+      <div style={{ position:'absolute', right:18, bottom:14, zIndex:999, color:'#fff', fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace', opacity:0.85, letterSpacing:0.5, fontSize:14 }}>
+        <Typewriter text="vector" />
+      </div>
     </div>
   );
+}
+
+// Lightweight typewriter with smooth stepping and persistent blinking underscore
+function Typewriter({ text }: { text: string }){
+  const [t, setT] = useState(0)
+  const [blink, setBlink] = useState(true)
+  const raf = useRef<number | null>(null)
+  const start = useRef<number>(0)
+  useEffect(() => {
+    const total = text.length
+    const duration = 900 // ms to complete typing
+    const step = (now: number) => {
+      if (!start.current) start.current = now
+      const p = Math.min(1, (now - start.current) / duration)
+      // ease then round to character
+      const eased = p < 0.5 ? 4*p*p*p : 1 - Math.pow(-2*p + 2, 3)/2
+      setT(Math.round(eased * total))
+      if (p < 1) raf.current = requestAnimationFrame(step)
+    }
+    raf.current = requestAnimationFrame(step)
+    const id = setInterval(()=> setBlink(b=>!b), 530)
+    return () => { if (raf.current) cancelAnimationFrame(raf.current); clearInterval(id) }
+  }, [text])
+  const shown = text.slice(0, t)
+  return <span>{shown}{blink ? <span style={{ opacity:0.9 }}>_</span> : <span style={{ opacity:0 }}>_</span>}</span>
 }
 
