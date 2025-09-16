@@ -166,6 +166,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
        1,  1,
     ]));
 
+    // Disabled outer ring (no-op) to avoid any background tint
     const drawOuter = regl({
       vert: `
       precision highp float;
@@ -178,35 +179,14 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
       }`,
       frag: `
       precision highp float;
-      varying vec2 v_uv;
-      uniform vec2 u_view;
-      uniform vec3 u_color;
-      uniform float u_radiusPx; // target radius in pixels
-      uniform float u_thicknessPx; // ring thickness
-      uniform float u_alpha;
-      float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-      void main(){
-        vec2 center = 0.5 * u_view;
-        float d = length(v_uv - center);
-        // crisp ring band; avoid full-frame glow to prevent color wash
-        float delta = abs(d - u_radiusPx);
-        float band = 1.0 - smoothstep(u_thicknessPx*0.6, u_thicknessPx*1.2, delta);
-        float grain = 0.8 + 0.2 * hash(v_uv * 1.1);
-        float a = u_alpha * band * grain;
-        gl_FragColor = vec4(u_color, a);
-      }`,
+      void main(){ discard; }
+      `,
       attributes: { a_pos: { buffer: quad, size: 2 } },
-      uniforms: {
-        u_view: ({ viewportWidth, viewportHeight }: any) => [viewportWidth, viewportHeight],
-        u_color: () => cfg.baseColor,
-        u_radiusPx: ({ viewportWidth, viewportHeight }: any) => 0.48 * Math.min(viewportWidth, viewportHeight),
-        u_thicknessPx: ({ viewportWidth, viewportHeight }: any) => 0.004 * Math.min(viewportWidth, viewportHeight),
-        u_alpha: () => 0.02,
-      },
+      uniforms: {},
       primitive: 'triangle strip',
       count: 4,
       depth: { enable: false },
-      blend: { enable: true, func: { srcRGB: 'one', srcAlpha: 'one', dstRGB: 'one', dstAlpha: 'one' } }
+      blend: { enable: false }
     });
     // no edges buffer since lines are removed
 
