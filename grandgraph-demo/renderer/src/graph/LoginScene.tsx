@@ -486,8 +486,11 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
         </div>
         {!animating && (
           <button
-            onMouseDown={(e: React.MouseEvent<HTMLButtonElement>)=>{ e.preventDefault(); e.stopPropagation(); start(); }}
-            onClick={(e: React.MouseEvent<HTMLButtonElement>)=>{ e.preventDefault(); e.stopPropagation(); }}
+            onClick={(e: React.MouseEvent<HTMLButtonElement>)=>{ 
+              e.preventDefault(); 
+              e.stopPropagation(); 
+              start(); 
+            }}
             disabled={startedRef.current}
             style={{
               marginTop: 20,
@@ -520,6 +523,8 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
               e.currentTarget.style.background='linear-gradient(145deg, rgba(255,255,255,0.15), rgba(255,255,255,0.05))';
             }}
             onMouseDown={(e: any)=>{ 
+              e.preventDefault();
+              e.stopPropagation();
               e.currentTarget.style.transform='scale(0.98) translateY(1px)'; 
             }}
             onMouseUp={(e: any)=>{ 

@@ -113,7 +113,7 @@ export default function App(){
       )}
       {showMobility && (
         <div style={{ position:'absolute', inset:0, background:'rgba(2,6,23,0.8)', display:'grid', placeItems:'center', zIndex:40 }}>
-          <div style={{ width:'95vw', height:'95vh', maxWidth:1200, maxHeight:900, borderRadius:24, background:'#0b0c10', border:'1px solid rgba(255,255,255,0.08)', boxShadow:'0 28px 120px rgba(0,0,0,0.6)', overflow:'hidden' }}>
+          <div style={{ width:'98vw', height:'96vh', maxWidth:'98vw', maxHeight:'96vh', borderRadius:20, background:'#0b0c10', border:'1px solid rgba(255,255,255,0.08)', boxShadow:'0 28px 120px rgba(0,0,0,0.6)', overflow:'hidden' }}>
             <div style={{ position:'absolute', top:16, right:16, zIndex:10 }}>
               <button onClick={()=>setShowMobility(false)} style={{ padding:'8px 12px', borderRadius:8, background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.2)', fontSize:14 }}>Close</button>
             </div>

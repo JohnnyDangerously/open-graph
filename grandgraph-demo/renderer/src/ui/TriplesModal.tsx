@@ -105,7 +105,7 @@ export default function TriplesModal({ open, onClose, triples }:{ open:boolean, 
           <svg width={WIDTH} height={320} style={{ position:'absolute', inset:0 }}>
             {/* Top bracket across all three */}
             <Line x1={c1 - AV/2} x2={c3 + AV/2} y={topY} />
-            <Badge x={center} y={topY} color="#38bdf8" label={`Overall Rank: #1 of 5`} hint="Overall Triple Rank vs other candidates in the list" />
+            <Badge x={center} y={topY - 12} color="#38bdf8" label={`Overall Rank: #1 of 5`} hint="Overall Triple Rank vs other candidates in the list" />
 
             {/* Above pair brackets */}
             <Line x1={c1 + AV/2} x2={c2 - AV/2} y={abovePairY} />
@@ -126,10 +126,14 @@ export default function TriplesModal({ open, onClose, triples }:{ open:boolean, 
             {/* Left relevance vertical bracket */}
             <VLine x={leftBracketX} y1={topY} y2={bottomY} />
             <Badge x={leftBracketX - 4} y={(topY + bottomY)/2} color="#94a3b8" label={`Relevance Index`} hint="How relevant this triple is to the input ask (context-specific)." />
+            {/* Transactional symmetry moved outside left bracket */}
+            <Badge x={leftBracketX - 90} y={(topY + bottomY)/2} color={symmetryColor} label={`Transactional ${symbolizeSymmetry(t.scores.transactionalSymmetry)}`} hint="Direction of influence for the introduction (junior → senior, senior → junior, or peers)." />
 
             {/* Right overall triple score vertical bracket */}
             <VLine x={rightBracketX} y1={topY} y2={bottomY} />
             <Badge x={rightBracketX + 4} y={(topY + bottomY)/2} color="#e5ecff" label={`Triple Score`} hint="Composite of relevance, closure, symmetry, fit, and fan-in." />
+            {/* Opportunity fit moved outside right bracket */}
+            <Badge x={rightBracketX + 120} y={(topY + bottomY)/2} color="#a78bfa" label={`Opportunity Fit ${Math.round(t.scores.opportunityFit)}%`} hint="Likelihood the ask succeeds given opportunity alignment and timing." />
           </svg>
 
           {/* Node tokens row (no avatars) */}
@@ -143,23 +147,22 @@ export default function TriplesModal({ open, onClose, triples }:{ open:boolean, 
             ))}
           </div>
 
-          {/* Center badges for symmetry and opportunity fit */}
-          <div style={{ position:'absolute', left:0, right:0, top:avatarY + AV/2 + 6, display:'flex', justifyContent:'center', gap:10 }}>
-            <Pill color={symmetryColor} label="Transactional" value={symbolizeSymmetry(t.scores.transactionalSymmetry)} hint="Direction of influence for the introduction (junior → senior, senior → junior, or peers)." />
-            <Pill color="#a78bfa" label="Opportunity Fit" value={`${Math.round(t.scores.opportunityFit)}%`} hint="Likelihood the ask succeeds given opportunity alignment and timing." />
-          </div>
+          {/* Center badges removed; relocated to sides */}
         </div>
       </div>
     );
   };
 
   return (
-    <div style={{ position:'absolute', inset:0, background:'rgba(2,6,23,0.7)', display:'grid', placeItems:'center', zIndex:40 }}>
-      <div style={{ width:1400, maxWidth:'98vw', padding:30, borderRadius:28, background:'#0b122a', color:'#e5ecff', border:'1px solid rgba(255,255,255,0.08)', boxShadow:'0 40px 160px rgba(0,0,0,0.65)' }}>
+    <div style={{ position:'absolute', inset:0, background:'rgba(0,0,0,0.9)', display:'grid', placeItems:'center', zIndex:40 }}>
+      <div style={{ width:1400, maxWidth:'98vw', padding:30, borderRadius:28, background:'rgba(3,6,12,0.86)', color:'#e5ecff', border:'1px solid rgba(255,255,255,0.06)', boxShadow:'0 48px 180px rgba(0,0,0,0.7)', position:'relative' }}>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
           <div style={{ fontSize:18, fontWeight:700 }}>Top Triples</div>
           <div style={{ fontSize:12, opacity:0.7 }}>AI-ranked introductions</div>
         </div>
+
+        {/* Close button top-right */}
+        <button onClick={onClose} style={{ position:'absolute', top:14, right:14, padding:'8px 10px', borderRadius:10, background:'rgba(255,255,255,0.06)', color:'#e5ecff', border:'1px solid rgba(255,255,255,0.18)' }}>Close</button>
 
         <div style={{ display:'grid', gap:22, alignItems:'center', justifyItems:'stretch' }}>
           {triples.map((t, i)=> (
@@ -168,9 +171,7 @@ export default function TriplesModal({ open, onClose, triples }:{ open:boolean, 
           ))}
         </div>
 
-        <div style={{ display:'flex', justifyContent:'center', marginTop:24 }}>
-          <button onClick={onClose} style={{ padding:'12px 16px', borderRadius:12, background:'linear-gradient(180deg, #0f172a, #0b122a)', color:'#e5ecff', border:'1px solid rgba(255,255,255,0.12)', boxShadow:'0 12px 40px rgba(0,0,0,0.5)' }}>Close</button>
-        </div>
+        <div style={{ display:'flex', justifyContent:'center', marginTop:24 }} />
       </div>
     </div>
   );

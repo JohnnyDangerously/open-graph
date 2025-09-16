@@ -188,14 +188,14 @@ export default function MobilitySankeyDemo() {
           {leftNodes.map((n: any, i: number) => (
             <g key={`L-${i}`}>
               <rect x={n.x} y={n.y} width={n.width} height={n.height} rx={4} fill={NODE_FILL} stroke={NODE_STROKE} strokeWidth={0.5} />
-              <text x={n.x - 8} y={n.y + n.height / 2} fill={NODE_TEXT} fontSize={10} textAnchor="end" dominantBaseline="middle" opacity={0.9}>{LEFT_COMPANIES[i]}</text>
+              <text x={n.x + 8} y={n.y + n.height / 2} fill={NODE_TEXT} fontSize={10} textAnchor="start" dominantBaseline="middle" opacity={0.9}>{LEFT_COMPANIES[i]}</text>
             </g>
           ))}
 
           {rightNodes.map((n: any, i: number) => (
             <g key={`R-${i}`}>
               <rect x={n.x} y={n.y} width={n.width} height={n.height} rx={4} fill={NODE_FILL} stroke={NODE_STROKE} strokeWidth={0.5} />
-              <text x={n.x + n.width + 8} y={n.y + n.height / 2} fill={NODE_TEXT} fontSize={10} textAnchor="start" dominantBaseline="middle" opacity={0.9}>{rightNodes[i].name}</text>
+              <text x={n.x + n.width - 8} y={n.y + n.height / 2} fill={NODE_TEXT} fontSize={10} textAnchor="end" dominantBaseline="middle" opacity={0.9}>{rightNodes[i].name}</text>
             </g>
           ))}
         </svg>
