@@ -98,8 +98,8 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
 
     // mixture weights (soft)
     // Increase shell presence for visible outer halo of dots
-    // Sanity check: 5x outer shell weight to visibly dominate
-    const wCore = 0.08, wClusterSmall = 0.14, wClusterMid = 0.12, wClusterFull = 0.16, wShell = 1.30, wDust = 0.04;
+    // Double internal cluster weights for tunability check
+    const wCore = 0.08, wClusterSmall = 0.28, wClusterMid = 0.24, wClusterFull = 0.32, wShell = 1.30, wDust = 0.04;
     const wSum = wCore + wClusterSmall + wClusterMid + wClusterFull + wShell + wDust;
     function fillRange(start: number, end: number){
       for (let i = start; i < end; i++) {
