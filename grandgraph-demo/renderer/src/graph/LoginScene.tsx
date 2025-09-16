@@ -246,7 +246,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
         float lp = length(p);
         float shellBoost = smoothstep(0.82, 0.99, lp);
         gl_PointSize = u_pointPx * (1.0 + 0.9 * shellBoost);
-        v_alpha = (0.12 + 0.22 * hash11(a_seed*9.9)) * (u_glow + 0.45 * shellBoost);
+        v_alpha = (0.12 + 0.22 * hash11(a_seed*9.9)) * (u_glow + 1.35 * shellBoost);
       }
       `,
       frag: `
