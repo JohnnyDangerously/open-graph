@@ -100,3 +100,4 @@ function symbolizeSymmetry(s: Triple['scores']['transactionalSymmetry']): string
 }
 
 
+
