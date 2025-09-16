@@ -47,7 +47,9 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     if (!canvas) return;
 
     // --- data (300k points, generated in chunks to avoid blocking) ---
-    const N = Math.max(1, cfg.particleCount | 0);
+    // 5x density spike for visibility sanity-check
+    const DENSITY_MULTIPLIER = 5;
+    const N = Math.max(1, (cfg.particleCount | 0) * DENSITY_MULTIPLIER);
     const pos0 = new Float32Array(N * 3);
     const seed = new Float32Array(N);
 
