@@ -29,7 +29,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
   const cfg = {
     particleCount: 200000,
     clusterCount: 9,
-    pointSizePx: 3.4,
+    pointSizePx: 10.2,
     baseColor: [0.70, 0.62, 0.94] as [number, number, number],
     background: [0.04, 0.04, 0.07] as [number, number, number],
     glow: 0.95,
