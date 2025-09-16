@@ -431,24 +431,42 @@ const ReglScene = forwardRef<Exposed>(function ReglScene(_props: Props, ref){
     for (let i = 0; i < tile.count; i++) seeds[i] = Math.random()
     fgSeedRef.current = regl.buffer(seeds)
 
-    // Build edges if present
+    // Build edges with filter mask applied
+    const makeMask = () => {
+      const f = props.filters || { email:false, work:false, social:false, phone:false }
+      return (f.email?1:0) | (f.work?2:0) | (f.social?4:0) | (f.phone?8:0)
+    }
     edgePosRef.current?.destroy?.(); edgeCountRef.current = 0
     if (tile.edges && tile.edges.length >= 2) {
-      const m = tile.edges.length >>> 1
-      const seg = new Float32Array(m * 4) // [ax,ay,bx,by] per segment
-      for (let i = 0; i < m; i++){
+      const mask = makeMask()
+      const flags: Uint8Array | undefined = (tile as any).flags
+      let kept = 0
+      const mAll = tile.edges.length >>> 1
+      const keep = new Uint8Array(mAll)
+      if (!flags || mask === 0) {
+        kept = mAll; keep.fill(1)
+      } else {
+        for (let i = 0; i < mAll; i++) {
+          const a = tile.edges[i*2] | 0
+          const b = tile.edges[i*2+1] | 0
+          const em = (flags[a] | flags[b]) & mask
+          if (em !== 0) { keep[i] = 1; kept++ }
+        }
+      }
+      const seg = new Float32Array(kept * 4)
+      const filtEdges = new Uint32Array(kept * 2)
+      for (let i = 0, w = 0, w2 = 0; i < mAll; i++) if (keep[i]){
         const s = tile.edges[i*2] | 0
         const t2 = tile.edges[i*2+1] | 0
-        seg[i*4] = source[s*2]; seg[i*4+1] = source[s*2+1]
-        seg[i*4+2] = source[t2*2]; seg[i*4+3] = source[t2*2+1]
+        seg[w*4] = source[s*2]; seg[w*4+1] = source[s*2+1]
+        seg[w*4+2] = source[t2*2]; seg[w*4+3] = source[t2*2+1]
+        filtEdges[w2*2] = s; filtEdges[w2*2+1] = t2
+        w++; w2++
       }
       edgePosRef.current = regl.buffer(seg)
-      edgeCountRef.current = m
-      // build glow mesh
-      try { glowMeshRef.current = buildEdgeQuads(regl, { nodes: source, edges: tile.edges, count: tile.count }, 6000) } catch { glowMeshRef.current = null }
-    } else {
-      glowMeshRef.current = null
-    }
+      edgeCountRef.current = kept
+      try { glowMeshRef.current = buildEdgeQuads(regl, { nodes: source, edges: filtEdges, count: tile.count }, 6000) } catch { glowMeshRef.current = null }
+    } else { glowMeshRef.current = null }
 
     // auto-fit the foreground to view on load
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -490,6 +508,43 @@ const ReglScene = forwardRef<Exposed>(function ReglScene(_props: Props, ref){
     }
     try { fgAlphaRef.current.destroy?.() } catch {}
     fgAlphaRef.current = regl.buffer(next)
+  }, [props.filters])
+
+  // Rebuild edge buffers (lines and glow) on filter changes
+  useEffect(() => {
+    const regl = reglRef.current
+    const t = tileRef.current
+    const source = posRef.current
+    if (!regl || !t || !source || !t.edges || t.edges.length < 2) return
+    const f = props.filters || { email:false, work:false, social:false, phone:false }
+    const mask = (f.email?1:0) | (f.work?2:0) | (f.social?4:0) | (f.phone?8:0)
+    const flags: Uint8Array | undefined = (t as any).flags
+    const mAll = t.edges.length >>> 1
+    let kept = 0
+    const keep = new Uint8Array(mAll)
+    if (!flags || mask === 0) { kept = mAll; keep.fill(1) }
+    else {
+      for (let i = 0; i < mAll; i++) {
+        const a = t.edges[i*2] | 0
+        const b = t.edges[i*2+1] | 0
+        const em = (flags[a] | flags[b]) & mask
+        if (em !== 0) { keep[i] = 1; kept++ }
+      }
+    }
+    const seg = new Float32Array(kept * 4)
+    const filtEdges = new Uint32Array(kept * 2)
+    for (let i = 0, w = 0, w2 = 0; i < mAll; i++) if (keep[i]){
+      const s = t.edges[i*2] | 0
+      const tt = t.edges[i*2+1] | 0
+      seg[w*4] = source[s*2]; seg[w*4+1] = source[s*2+1]
+      seg[w*4+2] = source[tt*2]; seg[w*4+3] = source[tt*2+1]
+      filtEdges[w2*2] = s; filtEdges[w2*2+1] = tt
+      w++; w2++
+    }
+    try { edgePosRef.current?.destroy?.() } catch {}
+    edgePosRef.current = regl.buffer(seg)
+    edgeCountRef.current = kept
+    try { glowMeshRef.current = buildEdgeQuads(regl, { nodes: source, edges: filtEdges, count: t.count }, 6000) } catch { glowMeshRef.current = null }
   }, [props.filters])
 
   return <canvas ref={canvasRef} style={{ position:'absolute', inset:0, width:'100vw', height:'100vh', display:'block' }} />

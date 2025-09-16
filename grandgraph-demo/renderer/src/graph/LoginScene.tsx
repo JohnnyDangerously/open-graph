@@ -91,6 +91,11 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
       const z = 2 * v - 1, r = Math.sqrt(Math.max(0, 1 - z * z)), phi = 2 * Math.PI * u;
       return [r * Math.cos(phi), r * Math.sin(phi), z] as const;
     }
+    // Simple 3D noise for shell holes
+    function noise3d(x: number, y: number, z: number) {
+      const p = Math.sin(x * 7.3 + y * 5.1 + z * 9.7) * Math.cos(x * 3.2 + y * 8.4 + z * 2.9);
+      return (p + 1) * 0.5; // 0..1
+    }
     // smooth radius samplers (no shells!)
     function radiusCore() { return 0.02 + 0.18 * Math.pow(Math.random(), 1.6); }
     function radiusBody() { return 0.30 + 0.60 * Math.pow(Math.random(), 0.9); }
@@ -134,7 +139,18 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
             const c = centers[(Math.random() * CLUSTERS) | 0]; const d = sampleAround(c, 0.11);
             const R = radiusBody(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
           } else if (u < wCore + wClusterSmall + wClusterMid + wClusterFull + wShell) {
-            const d = uniformDir(); const R = radiusShell(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
+            const d = uniformDir(); const R = radiusShell(); 
+            const px = d[0] * R, py = d[1] * R, pz = d[2] * R;
+            // Punch holes in the shell using 3D noise
+            const holeNoise = noise3d(px * 4, py * 4, pz * 4);
+            const holeThreshold = 0.35; // larger = more holes
+            if (holeNoise < holeThreshold) {
+              // Skip this shell particle (creates hole)
+              const fallbackD = uniformDir(); const fallbackR = 0.5 + 0.3 * Math.random();
+              x = fallbackD[0] * fallbackR; y = fallbackD[1] * fallbackR; z = fallbackD[2] * fallbackR;
+            } else {
+              x = px; y = py; z = pz;
+            }
           } else {
             const d = uniformDir(); const R = 0.20 + 0.80 * Math.random();
             x = d[0] * R; y = d[1] * R; z = d[2] * R;
