@@ -104,8 +104,8 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
 
     // mixture weights (soft)
     // Increase shell presence for visible outer halo of dots
-    // 5x outer shell weight while retaining some internal structure
-    const wCore = 0.10, wClusterSmall = 0.16, wClusterMid = 0.14, wClusterFull = 0.18, wShell = 0.90, wDust = 0.04;
+    // Boost outer shell density even more + brighten
+    const wCore = 0.08, wClusterSmall = 0.14, wClusterMid = 0.12, wClusterFull = 0.16, wShell = 1.20, wDust = 0.03;
     const wSum = wCore + wClusterSmall + wClusterMid + wClusterFull + wShell + wDust;
     function fillRange(start: number, end: number){
       for (let i = start; i < end; i++) {
@@ -156,8 +156,10 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
             x = d[0] * R; y = d[1] * R; z = d[2] * R;
           }
         }
+        // Condense overall sphere by 15% (scale by 0.85)
+        const scale = 0.85;
         const j = 3 * i;
-        pos0[j + 0] = x; pos0[j + 1] = y; pos0[j + 2] = z;
+        pos0[j + 0] = x * scale; pos0[j + 1] = y * scale; pos0[j + 2] = z * scale;
         seed[i] = Math.random();
       }
     }
@@ -243,8 +245,8 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
         gl_Position = vec4(clip, 0.0, 1.0);
         float lp = length(p);
         float shellBoost = smoothstep(0.82, 0.99, lp);
-        gl_PointSize = u_pointPx * (1.0 + 0.8 * shellBoost);
-        v_alpha = (0.12 + 0.22 * hash11(a_seed*9.9)) * (u_glow + 0.35 * shellBoost);
+        gl_PointSize = u_pointPx * (1.0 + 0.9 * shellBoost);
+        v_alpha = (0.12 + 0.22 * hash11(a_seed*9.9)) * (u_glow + 0.45 * shellBoost);
       }
       `,
       frag: `
