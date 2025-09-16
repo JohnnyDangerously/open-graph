@@ -96,7 +96,8 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     function radiusShell() { return 0.86 + 0.14 * Math.pow(Math.random(), 2.0); }
 
     // mixture weights (soft)
-    const wCore = 0.14, wClusterSmall = 0.22, wClusterMid = 0.20, wClusterFull = 0.20, wShell = 0.14, wDust = 0.10;
+    // Increase shell presence for visible outer halo of dots
+    const wCore = 0.10, wClusterSmall = 0.20, wClusterMid = 0.18, wClusterFull = 0.22, wShell = 0.22, wDust = 0.08;
     const wSum = wCore + wClusterSmall + wClusterMid + wClusterFull + wShell + wDust;
     function fillRange(start: number, end: number){
       for (let i = start; i < end; i++) {
@@ -166,7 +167,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
        1,  1,
     ]));
 
-    // Disabled outer ring (no-op) to avoid any background tint
+    // Disabled outer ring (no-op) to avoid any background tint; outputs transparent color to satisfy drivers
     const drawOuter = regl({
       vert: `
       precision highp float;
@@ -176,7 +177,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
       }`,
       frag: `
       precision highp float;
-      void main(){ discard; }
+      void main(){ gl_FragColor = vec4(0.0); }
       `,
       attributes: { a_pos: { buffer: quad, size: 2 } },
       uniforms: {},
