@@ -355,6 +355,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     loop();
 
     // Company tag animation system
+    let tagRafId: number | null = null;
     const updateCompanyTags = () => {
       const now = performance.now();
       setCompanyTags(prev => {
@@ -362,7 +363,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
         const active = prev.filter(tag => now - tag.startTime < 5000);
         
         // Add new tags if we have fewer than 5 and randomly spawn
-        if (active.length < 5 && Math.random() < 0.008) { // ~0.8% chance per frame at 60fps
+        if (active.length < 5 && Math.random() < 0.02) { // Increase spawn rate to 2%
           const company = companies[Math.floor(Math.random() * companies.length)];
           const canvas = canvasRef.current;
           if (canvas) {
@@ -379,7 +380,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
         }
         return active;
       });
-      requestAnimationFrame(updateCompanyTags);
+      tagRafId = requestAnimationFrame(updateCompanyTags);
     };
     updateCompanyTags();
 
@@ -430,6 +431,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
 
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      if (tagRafId) cancelAnimationFrame(tagRafId);
       window.removeEventListener('resize', resize);
       try { regl.destroy(); } catch {}
       reglRef.current = null;

@@ -36,6 +36,14 @@ export async function fetchEgoJSON(id: string, limit=1500){
   if (!r.ok) throw new Error(`ego json ${r.status}`)
   return asJSON(r)
 }
+export async function fetchEgoFastJSON(id: string, limit=1500){
+  const isCo = id.startsWith('company:')
+  const key = id.replace(/^company:|^person:/,'')
+  const param = isCo ? 'company_id' : 'person_id'
+  const r = await fetch(`${BASE}/graph/ego_fast?${param}=${encodeURIComponent(key)}&limit=${limit}&format=json`)
+  if (!r.ok) throw new Error(`ego_fast json ${r.status}`)
+  return asJSON(r)
+}
 export async function fetchEgoBinary(id: string, limit=1500){
   const isCo = id.startsWith('company:')
   const key = id.replace(/^company:|^person:/,'')

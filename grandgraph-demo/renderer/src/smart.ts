@@ -1,6 +1,6 @@
 import { cacheResolve, cacheTile } from './cache'
 import { store } from './store'
-import { resolvePerson, resolveCompany, fetchEgoJSON, fetchEgoBinary } from './lib/api'
+import { resolvePerson, resolveCompany, fetchEgoJSON, fetchEgoBinary, fetchEgoFastJSON } from './lib/api'
 import { parseJsonTile, parseTile } from './graph/parse'
 
 export async function resolveSmart(q: string): Promise<string | null> {
@@ -14,7 +14,8 @@ export async function resolveSmart(q: string): Promise<string | null> {
 }
 
 export async function loadTileSmart(key: string) {
-  // Prefer server JSON (edges), then binary, then cache
+  // Prefer fast path JSON (edges), then normal JSON, then binary, then cache
+  try { const jf = await fetchEgoFastJSON(key, 1500); return { tile: parseJsonTile(jf) } } catch {}
   try { const j = await fetchEgoJSON(key, 1500); return { tile: parseJsonTile(j) } } catch {}
   try { const b = await fetchEgoBinary(key, 1500); return { tile: parseTile(b) } } catch {}
   const c = await cacheTile(key)
