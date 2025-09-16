@@ -171,11 +171,8 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
       vert: `
       precision highp float;
       attribute vec2 a_pos; // clip-space
-      varying vec2 v_uv; // pixel coords
-      uniform vec2 u_view;
       void main(){
         gl_Position = vec4(a_pos, 0.0, 1.0);
-        v_uv = (a_pos*0.5 + 0.5) * u_view; // pixels
       }`,
       frag: `
       precision highp float;
@@ -194,7 +191,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
       vert: `
       precision highp float;
       attribute vec3 a_pos0;
-      attribute float a_group, a_seed;
+      attribute float a_seed;
       uniform float u_time, u_phase, u_zoom;
       uniform vec2  u_view;
       uniform mat3  u_rot;
