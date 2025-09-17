@@ -438,24 +438,35 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
     };
   }, []);
 
-  // Connect animation: 2s; zoom forward, tilt to top-down, flatten to 2D
+  // Connect animation: 3s seamless sequence - flatten → rotate → zoom into 2D
   const start = () => {
     if (startedRef.current || animating || !reglRef.current) return;
     startedRef.current = true;
     setAnimating(true);
-    const T = 2000;
+    const T = 3000; // Extended to 3s for smoother transition
     const t0 = performance.now();
 
     const tick = (now: number) => {
       const dt = now - t0;
       const p = clamp01(dt / T);
-      const zP = clamp01(dt / 600);
-      const rP = clamp01((dt - 200) / 1200);
-      const fP = clamp01((dt - 600) / 1000);
+      
+      // Phase 1 (0-1000ms): Flatten the sphere (Z-compression)
+      const flattenP = clamp01(dt / 1000);
+      
+      // Phase 2 (800-2000ms): Rotate to top-down view (overlaps with flatten)
+      const rotateP = clamp01((dt - 800) / 1200);
+      
+      // Phase 3 (1500-3000ms): Zoom into 2D canvas mode
+      const zoomP = clamp01((dt - 1500) / 1500);
 
-      zoomRef.current = 700 + 400 * easeInOutCubic(zP);
-      tiltRef.current = (15 + 75 * easeInOutCubic(rP)) * Math.PI / 180;
-      phaseRef.current = easeInOutCubic(fP);
+      // Smooth flatten: compress Z-axis to create 2D effect
+      phaseRef.current = easeInOutCubic(flattenP);
+      
+      // Smooth rotation: tilt from 15° to 90° (top-down)
+      tiltRef.current = (15 + 75 * easeInOutCubic(rotateP)) * Math.PI / 180;
+      
+      // Smooth zoom: zoom in for 2D canvas transition
+      zoomRef.current = 700 + 600 * easeInOutCubic(zoomP);
 
       if (p < 1) requestAnimationFrame(tick);
       else {
