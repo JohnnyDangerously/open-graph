@@ -364,8 +364,27 @@ const ReglScene = forwardRef<Exposed>(function ReglScene(_props: Props, ref){
     })
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      const sign = e.deltaY > 0 ? 0.9 : 1.1
-      setCamera((c) => ({ ...c, zoom: Math.max(0.5, Math.min(2.5, c.zoom * sign)) }))
+      const canvas = canvasRef.current!
+      const rect = canvas.getBoundingClientRect()
+      const mx = e.clientX - rect.left
+      const my = e.clientY - rect.top
+      const w = canvas.width
+      const h = canvas.height
+      // current ndc (from pixel)
+      const ndcX = (mx / w) * 2 - 1
+      const ndcY = (my / h) * 2 - 1
+      setCamera((c) => {
+        // world position under cursor before zoom
+        const wx = (ndcX - c.offset[0]) / c.zoom
+        const wy = (ndcY - c.offset[1]) / c.zoom
+        // smooth zoom factor
+        const factor = Math.exp(-e.deltaY * 0.0015)
+        const newZoom = Math.max(0.5, Math.min(2.5, c.zoom * factor))
+        // keep mouse position anchored: ndcTarget = newZoom*world + newOffset
+        const newOffX = ndcX - newZoom * wx
+        const newOffY = ndcY - newZoom * wy
+        return { zoom: newZoom, offset: [newOffX, newOffY] as [number, number] }
+      })
     }
     canvas.addEventListener('wheel', onWheel, { passive: false })
     window.addEventListener('wheel', onWheel, { passive: false })

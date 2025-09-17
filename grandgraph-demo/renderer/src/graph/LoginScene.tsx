@@ -482,7 +482,7 @@ export default function LoginScene({ onDone, onConnect, config }: Props) {
       {/* Wordmark + button stack */}
       <div style={{ position:'absolute', left:'25%', top:'80%', transform:'translate(-50%, -50%)', zIndex:1000, color:'#fff', textAlign:'left' as const }}>
         <div style={{ fontFamily:'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace', opacity:0.9, letterSpacing:1.2, fontSize:70, lineHeight:1 }}>
-          <Typewriter text="vector" />
+          <Typewriter text="open graph" />
         </div>
         {!animating && (
           <button
