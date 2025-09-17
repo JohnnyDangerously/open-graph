@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect } from "react";
+import "./App.css";
 import ReglScene from "./graph/ReglScene";
 import CommandBar from "./ui/CommandBar";
 import HUD from "./ui/HUD";
@@ -103,6 +104,8 @@ export default function App(){
 
   return (
     <div className="w-full h-full" style={{ background: "#0a0a12", color: "white", position:'fixed', inset:0, overflow:'hidden' }}>
+      {/* draggable title area */}
+      <div className="drag-region" style={{ position:'absolute', left:0, right:0, top:0, height:44, zIndex:50 }} />
       <ReglScene ref={sceneRef as any} concentric={concentric} filters={filters} onPick={(i)=>{ setSelectedIndex(i) }} onClear={()=>{ sceneRef.current?.clear(); setFocus(null); }} onStats={(fps,count)=>{ setFps(fps); setNodeCount(count) }} />
       <Sidebar open={sidebarOpen} onToggle={()=>setSidebarOpen(!sidebarOpen)} items={Array.from({length: Math.max(0,nodeCount)},(_,i)=>({index:i, group: (i%8)}))} onSelect={(i)=>{/* future: refocus */}} />
       <CommandBar onRun={run} />

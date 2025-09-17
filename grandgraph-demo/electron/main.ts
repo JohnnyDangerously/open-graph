@@ -8,6 +8,8 @@ async function createWindow() {
     width: 1360,
     height: 900,
     backgroundColor: "#0a0a12",
+    titleBarStyle: "hidden",
+    trafficLightPosition: { x: 12, y: 12 },
     webPreferences: {
       contextIsolation: false,
       nodeIntegration: true,
