@@ -62,28 +62,33 @@ function makeFlows(world: ReturnType<typeof makeWorld>, qIdx: number) {
   const rnd = mulberry32(100 + qIdx * 13), flows: { from: number; to: number; count: number }[] = [];
   const { leftSizes, base } = world;
 
-  // Define main migration leaders but allow more connections overall
+  // Define main migration leaders and emphasize middle-left companies for clustering
   const mainLeaders = [0, 1, 2, 3]; // Apple, Microsoft, Google, Amazon indices
+  const midLeft1 = Math.floor(LEFT_COMPANIES.length/2) - 1; // middle two on the left
+  const midLeft2 = Math.floor(LEFT_COMPANIES.length/2);
   
   for (let i = 0; i < LEFT_COMPANIES.length; i++) {
     const isMainLeader = mainLeaders.includes(i);
-    const baseChurnRate = isMainLeader ? 0.06 : 0.03; // Higher base rates for more connections
-    const churnRate = baseChurnRate + 0.03 * rnd();
-    const movers = Math.max(6, Math.round(leftSizes[i] * churnRate));
+    const isMiddleLeft = (i === midLeft1 || i === midLeft2);
+    // Reduce overall density ~25% and cluster around middle-left companies
+    const baseChurnRate = isMiddleLeft ? 0.14 : (isMainLeader ? 0.08 : 0.045);
+    const churnRate = baseChurnRate + 0.04 * rnd();
+    const movers = Math.max(8, Math.round(leftSizes[i] * churnRate));
     
     const weights = base[i].map((b) => b * (0.7 + 0.6 * rnd()));
     const sum = weights.reduce((a, b) => a + b, 0);
     
-    // Allow more connections - main leaders get many, others get several
-    const maxConnections = isMainLeader ? 12 : 8;
+    // Reduce connections ~25% overall; middle-left still allowed slightly more
+    const maxConnections = isMiddleLeft ? 16 : (isMainLeader ? 15 : 10);
     const sortedTargets = weights.map((w, j) => ({ j, w })).sort((a, b) => b.w - a.w).slice(0, maxConnections);
     
     for (const { j, w } of sortedTargets) {
       const portion = w / sum;
-      const count = Math.round(movers * portion * (0.7 + 0.6 * rnd()));
+      const count = Math.round(movers * portion * (0.8 + 0.6 * rnd()));
       
       // Lower thresholds for more connections
-      const minCount = isMainLeader ? 4 : 2;
+      // Increase threshold to prune small links; keep more for middle-left clustering
+      const minCount = isMiddleLeft ? 4 : (isMainLeader ? 5 : 3);
       if (count >= minCount && LEFT_COMPANIES[i] !== RIGHT_COMPANIES[j]) {
         flows.push({ from: i, to: j, count });
       }
@@ -93,12 +98,13 @@ function makeFlows(world: ReturnType<typeof makeWorld>, qIdx: number) {
 }
 
 // Layout constants and helpers
-const LEFT_X = 140, RIGHT_X = 960, WIDTH = 1100, HEIGHT = 760, NODE_W = 130, GAP = 10;
+const LEFT_X = 62, RIGHT_X = 471, WIDTH = 533, HEIGHT = 349, NODE_W = 56, GAP = 4;
+const TOP_PAD = 28; // space for column headers above links
 
 function layoutNodes(names: string[], sizes: number[], x: number) {
   const total = sizes.reduce((a, b) => a + b, 0);
-  const scale = (HEIGHT - GAP * (names.length + 1)) / total;
-  let y = GAP;
+  const scale = (HEIGHT - TOP_PAD - GAP * (names.length + 1)) / total;
+  let y = GAP + TOP_PAD;
   return names.map((name, i) => {
     const h = Math.max(6, sizes[i] * scale);
     const node = { name, x, y, width: NODE_W, height: h };
@@ -115,8 +121,8 @@ function computeRightOrder(flows: { from: number; to: number; count: number }[])
 
 function makePaths(leftNodes: any[], rightNodes: any[], leftSizes: number[], rightSizes: number[], flows: { from: number; to: number; count: number }[]) {
   const leftTotal = leftSizes.reduce((a, b) => a + b, 0), rightTotal = rightSizes.reduce((a, b) => a + b, 0);
-  const leftScale = (HEIGHT - GAP * (leftNodes.length + 1)) / leftTotal;
-  const rightScale = (HEIGHT - GAP * (rightNodes.length + 1)) / rightTotal;
+  const leftScale = (HEIGHT - TOP_PAD - GAP * (leftNodes.length + 1)) / leftTotal;
+  const rightScale = (HEIGHT - TOP_PAD - GAP * (rightNodes.length + 1)) / rightTotal;
 
   const L = leftNodes.map((n, i) => ({ ...n, cursor: n.y, size: leftSizes[i] }));
   const R = rightNodes.map((n, i) => ({ ...n, cursor: n.y, size: rightSizes[i] }));
@@ -158,18 +164,18 @@ export default function MobilitySankeyDemo() {
   // Removed auto-progression - user controls manually
 
   return (
-    <div className="w-full h-full flex flex-col" style={{ background: BG, minHeight: '100%', padding: '24px' }}>
+    <div className="w-full h-full flex flex-col" style={{ background: BG, minHeight: '100%', height:'100%', padding: '24px', boxSizing:'border-box' }}>
       <div className="mb-4 flex-shrink-0">
-        <h2 className="text-2xl font-bold tracking-tight mb-2" style={{ color: NODE_TEXT }}>
+        <h2 className="text-2xl font-bold tracking-tight mb-2" style={{ color: NODE_TEXT, fontSize: 17 }}>
           Migratory <span style={{ color: LINK_GRAD_START }}>Patterns</span>
         </h2>
-        <p className="text-sm opacity-60" style={{ color: NODE_TEXT }}>
+        <p className="text-sm opacity-60" style={{ color: NODE_TEXT, fontSize: 9 }}>
           migration flows across the world.
         </p>
       </div>
 
-      <div className="flex-1 relative rounded-lg overflow-hidden mb-4" style={{ border: `1px solid ${NODE_STROKE}` }}>
-        <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} width="100%" height="100%" style={{ display: 'block' }}>
+      <div className="flex-1 relative rounded-lg overflow-hidden mb-4" style={{ border: `1px solid ${NODE_STROKE}`, height: 'calc(100vh - 260px)', minHeight: 300 }}>
+        <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} width="100%" height="100%" preserveAspectRatio="xMidYMid meet" style={{ display: 'block' }}>
           <defs>
             <linearGradient id="gLink" x1="0%" y1="0%" x2="100%" y2="0%">
               <stop offset="0%" stopColor={LINK_GRAD_START} />
@@ -186,18 +192,39 @@ export default function MobilitySankeyDemo() {
           ))}
 
           {leftNodes.map((n: any, i: number) => (
-            <g key={`L-${i}`}>
-              <rect x={n.x} y={n.y} width={n.width} height={n.height} rx={4} fill={NODE_FILL} stroke={NODE_STROKE} strokeWidth={0.5} />
-              <text x={n.x + 8} y={n.y + n.height / 2} fill={NODE_TEXT} fontSize={10} textAnchor="start" dominantBaseline="middle" opacity={0.9}>{LEFT_COMPANIES[i]}</text>
+            <g key={`L-${i}`}> 
+              <defs>
+                <linearGradient id={`gradL-${i}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#1f1f1f" />
+                  <stop offset="100%" stopColor="#141414" />
+                </linearGradient>
+                <filter id={`shadowL-${i}`} x="-20%" y="-20%" width="140%" height="140%">
+                  <feDropShadow dx="0" dy="1" stdDeviation="1.2" floodColor="#000" floodOpacity="0.4" />
+                </filter>
+              </defs>
+              <rect x={n.x} y={n.y} width={n.width} height={n.height} rx={6} fill={`url(#gradL-${i})`} stroke="#2a2a2a" strokeWidth={0.75} filter={`url(#shadowL-${i})`} />
+              <text x={n.x + 9} y={n.y + n.height / 2} fill={NODE_TEXT} fontSize={7} textAnchor="start" dominantBaseline="middle" opacity={0.95}>{LEFT_COMPANIES[i]}</text>
             </g>
           ))}
 
           {rightNodes.map((n: any, i: number) => (
             <g key={`R-${i}`}>
-              <rect x={n.x} y={n.y} width={n.width} height={n.height} rx={4} fill={NODE_FILL} stroke={NODE_STROKE} strokeWidth={0.5} />
-              <text x={n.x + n.width - 8} y={n.y + n.height / 2} fill={NODE_TEXT} fontSize={10} textAnchor="end" dominantBaseline="middle" opacity={0.9}>{rightNodes[i].name}</text>
+              <defs>
+                <linearGradient id={`gradR-${i}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#1f1f1f" />
+                  <stop offset="100%" stopColor="#141414" />
+                </linearGradient>
+                <filter id={`shadowR-${i}`} x="-20%" y="-20%" width="140%" height="140%">
+                  <feDropShadow dx="0" dy="1" stdDeviation="1.2" floodColor="#000" floodOpacity="0.4" />
+                </filter>
+              </defs>
+              <rect x={n.x} y={n.y} width={n.width} height={n.height} rx={6} fill={`url(#gradR-${i})`} stroke="#2a2a2a" strokeWidth={0.75} filter={`url(#shadowR-${i})`} />
+              <text x={n.x + n.width - 9} y={n.y + n.height / 2} fill={NODE_TEXT} fontSize={7} textAnchor="end" dominantBaseline="middle" opacity={0.95}>{rightNodes[i].name}</text>
             </g>
           ))}
+          {/* Column headers (placed above link area) */}
+          <text x={LEFT_X + NODE_W / 2} y={TOP_PAD * 0.5} fill={NODE_TEXT} fontSize={8} textAnchor="middle" opacity={0.75}>Existing Influence</text>
+          <text x={RIGHT_X + NODE_W / 2} y={TOP_PAD * 0.5} fill={NODE_TEXT} fontSize={8} textAnchor="middle" opacity={0.75}>New Influence</text>
         </svg>
       </div>
 

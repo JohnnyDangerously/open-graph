@@ -27,13 +27,13 @@ export default function TriplesModal({ open, onClose, triples }:{ open:boolean, 
 
   const Row = ({ t, index }:{ t: Triple, index: number }) => {
     const isMain = !!t.highlighted;
-    const nodeSize = isMain ? 84 : 22;
-    const gap = isMain ? 56 : 10;
+    const nodeSize = isMain ? 84 : 30;
+    const gap = isMain ? 56 : 18;
     const rowOpacity = isMain ? 1 : 0.55;
     const rowScale = isMain ? 1 : 0.9;
 
     const Pill = ({ color, label, value, hint }:{ color:string, label:string, value:string | number, hint?:string }) => (
-      <div title={hint} aria-label={hint} style={{ display:'inline-flex', alignItems:'center', gap:6, padding:'6px 10px', borderRadius:999, background:`${color}15`, color, fontSize:12, border:`1px solid ${color}40` }}>
+      <div title={hint} aria-label={hint} style={{ display:'inline-flex', alignItems:'center', gap:6, padding:'6px 10px', borderRadius:999, background:`${color}15`, color, fontSize:12, border:`1px solid ${color}40`, cursor:'help' }}>
         <span style={{ fontWeight:600 }}>{label}</span>
         <span style={{ opacity:0.9 }}>{value}</span>
       </div>
@@ -60,7 +60,7 @@ export default function TriplesModal({ open, onClose, triples }:{ open:boolean, 
               <NodeToken label={getInitials(t.right.name)} size={nodeSize} idx={2} />
             </div>
             <div style={{ justifySelf:'end' }}>
-              <div style={{ display:'inline-flex', alignItems:'center', gap:6, padding:'6px 10px', borderRadius:999, background:'rgba(255,255,255,0.04)', color:'#e5ecff', fontSize:11, border:'1px solid rgba(255,255,255,0.12)' }}>Score {Math.round((t.scores.triadicClosure*100 + t.scores.opportunityFit)/2)}</div>
+              <div title="Composite score blending closure and opportunity fit for quick skim" aria-label="Composite score blending closure and opportunity fit for quick skim" style={{ display:'inline-flex', alignItems:'center', gap:6, padding:'6px 10px', borderRadius:999, background:'rgba(255,255,255,0.04)', color:'#e5ecff', fontSize:11, border:'1px solid rgba(255,255,255,0.12)', cursor:'help' }}>Score {Math.round((t.scores.triadicClosure*100 + t.scores.opportunityFit)/2)}</div>
             </div>
           </div>
         </div>
@@ -68,21 +68,20 @@ export default function TriplesModal({ open, onClose, triples }:{ open:boolean, 
     }
 
     // Highlighted row with bracketed scoring overlay
-    const WIDTH = 1280;
-    const AV = nodeSize; // 84
-    const GAP = 260; // much more generous spacing to avoid crowding
+    const WIDTH = 1600;
+    const AV = 100; // larger avatars for emphasis
+    const GAP = 320; // more generous spacing to avoid crowding
     const center = WIDTH / 2;
     const c1 = center - (AV + GAP);
     const c2 = center;
     const c3 = center + (AV + GAP);
-    const topY = 40;
-    const abovePairY = 90;
-    const avatarY = 160;
-    const belowPairY = 230;
-    const triadicY = 260;
-    const bottomY = 285;
-    const leftBracketX = c1 - AV/2 - 80;
-    const rightBracketX = c3 + AV/2 + 80;
+    const topY = 46;
+    const abovePairY = 108;
+    const avatarY = 188;
+    const belowPairY = 258;
+    const triadicY = 292;
+    const bottomY = 320;
+    const rightBracketX = c3 + AV/2 + 96;
 
     const Line = ({ x1, x2, y }:{ x1:number, x2:number, y:number }) => (
       <line x1={x1} x2={x2} y1={y} y2={y} stroke="#ffffff" strokeOpacity={0.22} strokeWidth={3} strokeLinecap="round" />
@@ -92,17 +91,25 @@ export default function TriplesModal({ open, onClose, triples }:{ open:boolean, 
       <line x1={x} x2={x} y1={y1} y2={y2} stroke="#ffffff" strokeOpacity={0.22} strokeWidth={3} strokeLinecap="round" />
     );
 
-    const Badge = ({ x, y, color, label, hint }:{ x:number, y:number, color:string, label:string, hint?:string }) => (
-      <foreignObject x={x} y={y} width={260} height={28} style={{ overflow:'visible', pointerEvents:'auto' }}>
-        <div title={hint} aria-label={hint} style={{ display:'inline-flex', alignItems:'center', gap:6, padding:'6px 10px', borderRadius:999, background:`${color}12`, color, fontSize:12, border:`1px solid ${color}40`, transform:'translate(-50%, -50%)' }}>{label}</div>
-      </foreignObject>
-    );
+    const Badge = ({ x, y, color, label, hint }:{ x:number, y:number, color:string, label:string, hint?:string }) => {
+      const [hover, setHover] = React.useState(false);
+      return (
+        <foreignObject x={x} y={y} width={320} height={40} style={{ overflow:'visible', pointerEvents:'auto' }}>
+          <div onMouseEnter={()=>setHover(true)} onMouseLeave={()=>setHover(false)} title={hint} aria-label={hint} style={{ position:'relative', display:'inline-flex', alignItems:'center', gap:6, padding:'6px 10px', borderRadius:999, background:'#ffffff', color:'#0b122a', fontSize:12, border:`1px solid ${color}55`, transform:'translate(-50%, -50%)', cursor:'help', boxShadow:'0 10px 24px rgba(0,0,0,0.35)' }}>
+            {label}
+            {hint && hover && (
+              <div style={{ position:'absolute', top:-42, left:'50%', transform:'translate(-50%, 0)', whiteSpace:'nowrap', padding:'8px 10px', borderRadius:8, background:'rgba(0,0,0,0.9)', color:'#e5ecff', border:'1px solid rgba(255,255,255,0.18)', fontSize:11, pointerEvents:'none', boxShadow:'0 10px 24px rgba(0,0,0,0.4)' }}>{hint}</div>
+            )}
+          </div>
+        </foreignObject>
+      );
+    };
 
     return (
       <div style={{ transform:`scale(${rowScale})`, opacity: rowOpacity, transition:'all 160ms ease', padding:'18px 16px 12px 16px', borderRadius:16, border:'1px solid rgba(79,124,255,0.22)', background:'linear-gradient(180deg, rgba(79,124,255,0.10), rgba(79,124,255,0.04))' }}>
         <div style={{ width:WIDTH, maxWidth:'98vw', position:'relative', margin:'0 auto' }}>
           {/* SVG overlay for brackets */}
-          <svg width={WIDTH} height={320} style={{ position:'absolute', inset:0 }}>
+          <svg width={WIDTH} height={360} style={{ position:'absolute', inset:0, zIndex:1, pointerEvents:'none' }}>
             {/* Top bracket across all three */}
             <Line x1={c1 - AV/2} x2={c3 + AV/2} y={topY} />
             <Badge x={center} y={topY - 12} color="#38bdf8" label={`Overall Rank: #1 of 5`} hint="Overall Triple Rank vs other candidates in the list" />
@@ -123,22 +130,20 @@ export default function TriplesModal({ open, onClose, triples }:{ open:boolean, 
             <Line x1={c1 - AV/3} x2={c3 + AV/3} y={triadicY} />
             <Badge x={center} y={triadicY + 18} color="#60a5fa" label={`Triadic Closure ${t.scores.triadicClosure.toFixed(2)} • Fan-In ${Math.round(t.scores.fanIn)}pctl`} hint="Group connectivity: how tightly these three are connected • Fan-In indicates how this triple compares to the network (percentile)." />
 
-            {/* Left relevance vertical bracket */}
-            <VLine x={leftBracketX} y1={topY} y2={bottomY} />
-            <Badge x={leftBracketX - 4} y={(topY + bottomY)/2} color="#94a3b8" label={`Relevance Index`} hint="How relevant this triple is to the input ask (context-specific)." />
-            {/* Transactional symmetry moved outside left bracket */}
-            <Badge x={leftBracketX - 90} y={(topY + bottomY)/2} color={symmetryColor} label={`Transactional ${symbolizeSymmetry(t.scores.transactionalSymmetry)}`} hint="Direction of influence for the introduction (junior → senior, senior → junior, or peers)." />
+            {/* Left-side labels removed per request */}
 
             {/* Right overall triple score vertical bracket */}
             <VLine x={rightBracketX} y1={topY} y2={bottomY} />
             <Badge x={rightBracketX + 4} y={(topY + bottomY)/2} color="#e5ecff" label={`Triple Score`} hint="Composite of relevance, closure, symmetry, fit, and fan-in." />
             {/* Opportunity fit moved outside right bracket */}
-            <Badge x={rightBracketX + 120} y={(topY + bottomY)/2} color="#a78bfa" label={`Opportunity Fit ${Math.round(t.scores.opportunityFit)}%`} hint="Likelihood the ask succeeds given opportunity alignment and timing." />
+            <Badge x={rightBracketX + 170} y={(topY + bottomY)/2} color="#a78bfa" label={`Opportunity Fit ${Math.round(t.scores.opportunityFit)}%`} hint="Likelihood the ask succeeds given opportunity alignment and timing." />
+            {/* Transactional symmetry relocated to right side below */}
+            <Badge x={rightBracketX + 110} y={bottomY + 26} color={symmetryColor} label={`Transactional ${symbolizeSymmetry(t.scores.transactionalSymmetry)}`} hint="Direction of influence for the introduction (junior → senior, senior → junior, or peers)." />
           </svg>
 
           {/* Node tokens row (no avatars) */}
-          <div style={{ height:300 }} />
-          <div style={{ position:'absolute', left:0, right:0, top:avatarY - AV/2, display:'flex', justifyContent:'center', gap:GAP }}>
+          <div style={{ height:340 }} />
+          <div style={{ position:'absolute', left:0, right:0, top:avatarY - AV/2, display:'flex', justifyContent:'center', gap:GAP, zIndex:2 }}>
             {[t.left, t.middle, t.right].map((p,i)=> (
               <div key={i} style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8 }}>
                 <NodeToken label={getInitials(p.name)} size={AV} idx={i} />
@@ -147,6 +152,24 @@ export default function TriplesModal({ open, onClose, triples }:{ open:boolean, 
             ))}
           </div>
 
+          {/* Badge overlay on top for highest stacking */}
+          <svg width={WIDTH} height={360} style={{ position:'absolute', inset:0, zIndex:5, pointerEvents:'auto' }}>
+            {/* Top chip */}
+            <Badge x={center} y={topY - 12} color="#38bdf8" label={`Overall Rank: #1 of 5`} hint="Overall Triple Rank vs other candidates in the list" />
+            {/* Pairwise top */}
+            <Badge x={(c1 + c2)/2} y={abovePairY - 16} color="#22c55e" label={`L–M ${t.scores.pairLM.toFixed(2)}`} hint="Pairwise Relationship Strength (Left ↔ Middle), normalized 0–1" />
+            <Badge x={(c2 + c3)/2} y={abovePairY - 16} color="#22c55e" label={`M–R ${t.scores.pairMR.toFixed(2)}`} hint="Pairwise Relationship Strength (Middle ↔ Right), normalized 0–1" />
+            {/* Pairwise bottom */}
+            <Badge x={(c1 + c2)/2} y={belowPairY + 16} color="#22c55e" label={`L–M ${t.scores.pairLM.toFixed(2)}`} hint="Pairwise Relationship Strength (Left ↔ Middle), normalized 0–1" />
+            <Badge x={(c2 + c3)/2} y={belowPairY + 16} color="#22c55e" label={`M–R ${t.scores.pairMR.toFixed(2)}`} hint="Pairwise Relationship Strength (Middle ↔ Right), normalized 0–1" />
+            {/* Triadic closure */}
+            <Badge x={center} y={triadicY + 18} color="#60a5fa" label={`Triadic Closure ${t.scores.triadicClosure.toFixed(2)} • Fan-In ${Math.round(t.scores.fanIn)}pctl`} hint="Group connectivity: how tightly these three are connected • Fan-In indicates how this triple compares to the network (percentile)." />
+            {/* Right side badges */}
+            <Badge x={rightBracketX + 4} y={(topY + bottomY)/2} color="#e5ecff" label={`Triple Score`} hint="Composite of relevance, closure, symmetry, fit, and fan-in." />
+            <Badge x={rightBracketX + 170} y={(topY + bottomY)/2} color="#a78bfa" label={`Opportunity Fit ${Math.round(t.scores.opportunityFit)}%`} hint="Likelihood the ask succeeds given opportunity alignment and timing." />
+            <Badge x={rightBracketX + 110} y={bottomY + 26} color={symmetryColor} label={`Transactional ${symbolizeSymmetry(t.scores.transactionalSymmetry)}`} hint="Direction of influence for the introduction (junior → senior, senior → junior, or peers)." />
+          </svg>
+
           {/* Center badges removed; relocated to sides */}
         </div>
       </div>
@@ -154,15 +177,15 @@ export default function TriplesModal({ open, onClose, triples }:{ open:boolean, 
   };
 
   return (
-    <div style={{ position:'absolute', inset:0, background:'rgba(0,0,0,0.9)', display:'grid', placeItems:'center', zIndex:40 }}>
-      <div style={{ width:1400, maxWidth:'98vw', padding:30, borderRadius:28, background:'rgba(3,6,12,0.86)', color:'#e5ecff', border:'1px solid rgba(255,255,255,0.06)', boxShadow:'0 48px 180px rgba(0,0,0,0.7)', position:'relative' }}>
+    <div style={{ position:'absolute', inset:0, background:'rgba(0,0,0,0.92)', display:'grid', placeItems:'center', zIndex:40 }}>
+      <div style={{ width:1600, maxWidth:'98vw', padding:36, borderRadius:30, background:'#000', color:'#e5ecff', border:'1px solid rgba(255,255,255,0.08)', boxShadow:'0 60px 220px rgba(0,0,0,0.85)', position:'relative' }}>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
           <div style={{ fontSize:18, fontWeight:700 }}>Top Triples</div>
           <div style={{ fontSize:12, opacity:0.7 }}>AI-ranked introductions</div>
         </div>
 
         {/* Close button top-right */}
-        <button onClick={onClose} style={{ position:'absolute', top:14, right:14, padding:'8px 10px', borderRadius:10, background:'rgba(255,255,255,0.06)', color:'#e5ecff', border:'1px solid rgba(255,255,255,0.18)' }}>Close</button>
+        <button onClick={onClose} style={{ position:'absolute', top:14, right:14, padding:'8px 10px', borderRadius:10, background:'rgba(255,255,255,0.08)', color:'#e5ecff', border:'1px solid rgba(255,255,255,0.22)' }}>Close</button>
 
         <div style={{ display:'grid', gap:22, alignItems:'center', justifyItems:'stretch' }}>
           {triples.map((t, i)=> (

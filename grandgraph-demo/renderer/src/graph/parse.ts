@@ -8,6 +8,8 @@ export type ParsedTile = {
   idsIndex?: Uint32Array
   idsBlob?: Uint8Array
   flags?: Uint8Array
+  ids?: string[]
+  labels?: string[]
 }
 
 export function parseTile(buf: ArrayBuffer): ParsedTile {
@@ -72,6 +74,8 @@ export function parseJsonTile(json: any): ParsedTile {
     const alpha = new Float32Array(N)
     const group = new Uint16Array(N)
     const flags = new Uint8Array(N)
+    const ids: string[] = new Array(N)
+    const labels: string[] = new Array(N)
     for (let i = 0; i < N; i++) {
       const xy = json.coords.nodes[i]
       nodes[2 * i] = xy[0]
@@ -81,6 +85,8 @@ export function parseJsonTile(json: any): ParsedTile {
       const n = json.meta.nodes[i] || {}
       group[i] = (n.group | 0) >>> 0
       flags[i] = (n.flags | 0) >>> 0
+      ids[i] = typeof n.id === 'string' ? n.id : ''
+      labels[i] = typeof n.full_name === 'string' && n.full_name ? n.full_name : (ids[i] || `#${i}`)
     }
     let edges: Uint32Array | undefined
     if (Array.isArray(json.coords.edges)) {
@@ -89,7 +95,7 @@ export function parseJsonTile(json: any): ParsedTile {
       for (let e = 0; e < E; e++) { const p = json.coords.edges[e]; flat[2 * e] = p[0] | 0; flat[2 * e + 1] = p[1] | 0 }
       edges = flat
     }
-    return { nodes, size, alpha, group, flags, edges, count: N }
+    return { nodes, size, alpha, group, flags, edges, count: N, ids, labels }
   }
   // Shape B: { nodes:[{id, group, flags}], coords:{nodes:[[x,y]], edges:[[s,t]]} or coords omitted
   if (json && Array.isArray(json.nodes) && json.coords) {
@@ -99,6 +105,8 @@ export function parseJsonTile(json: any): ParsedTile {
     const alpha = new Float32Array(N)
     const group = new Uint16Array(N)
     const flags = new Uint8Array(N)
+    const ids: string[] = new Array(N)
+    const labels: string[] = new Array(N)
     for (let i = 0; i < N; i++) {
       const xy = json.coords.nodes[i]
       nodes[2 * i] = xy[0]
@@ -108,6 +116,8 @@ export function parseJsonTile(json: any): ParsedTile {
       const n = json.nodes[i] || {}
       group[i] = (n.group | 0) >>> 0
       flags[i] = (n.flags | 0) >>> 0
+      ids[i] = typeof n.id === 'string' ? n.id : ''
+      labels[i] = typeof n.full_name === 'string' && n.full_name ? n.full_name : (ids[i] || `#${i}`)
     }
     let edges: Uint32Array | undefined
     if (Array.isArray(json.coords.edges)) {
@@ -116,7 +126,7 @@ export function parseJsonTile(json: any): ParsedTile {
       for (let e = 0; e < E; e++) { const p = json.coords.edges[e]; flat[2 * e] = p[0] | 0; flat[2 * e + 1] = p[1] | 0 }
       edges = flat
     }
-    return { nodes, size, alpha, group, flags, edges, count: N }
+    return { nodes, size, alpha, group, flags, edges, count: N, ids, labels }
   }
   throw new Error('Unsupported JSON tile shape')
 }
