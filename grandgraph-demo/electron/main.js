@@ -25,7 +25,7 @@ async function createWindow(){
   if (isDev) {
     const devUrl = process.env.ELECTRON_START_URL || 'http://127.0.0.1:5173'
     await win.loadURL(devUrl)
-    win.webContents.openDevTools({ mode: 'detach' })
+    // Keep devtools closed by default; toggle manually if needed
   } else {
     const indexPath = path.join(__dirname, '../renderer/index.html')
     await win.loadFile(indexPath)

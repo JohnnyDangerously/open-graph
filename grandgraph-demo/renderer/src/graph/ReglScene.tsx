@@ -212,7 +212,7 @@ const ReglScene = forwardRef<Exposed>(function ReglScene(_props: Props, ref){
         gl_Position = vec4(ndc, 0.0, 1.0);
       }`,
       frag: `
-      precision mediump float; void main(){ gl_FragColor = vec4(1.0,0.85,0.25,0.22); }`,
+      precision mediump float; void main(){ gl_FragColor = vec4(1.0,0.65,0.0,0.8); }`,
       attributes: { a_pos: () => edgePosRef.current },
       uniforms: { uScale: () => [cameraRef.current.zoom,0,0,cameraRef.current.zoom], uOffset: () => cameraRef.current.offset },
       primitive: 'lines', count: () => edgeCountRef.current * 2, depth: { enable:false }, blend:{ enable:true, func:{ srcRGB:'src alpha', srcAlpha:'one', dstRGB:'one minus src alpha', dstAlpha:'one minus src alpha' } }
@@ -279,7 +279,7 @@ const ReglScene = forwardRef<Exposed>(function ReglScene(_props: Props, ref){
       drawPoints({ position: bgPosition, aSize: bgSize, aAlpha: bgAlpha, aSeed: bgSeed, count: bg.count, uColor: [0.70, 0.62, 0.94], uJitterAmp: 0.004, uSizeScale: 0.9, uMaxSizePx: 3.0 })
       const t = tileRef.current
       if (t) {
-        drawPoints({ position: fgPositionRef.current, aSize: fgSizeRef.current, aAlpha: fgAlphaRef.current, aSeed: fgSeedRef.current, count: t.count, uColor: [0.96, 0.58, 0.90], uJitterAmp: 0.002, uSizeScale: 1.0, uMaxSizePx: 3.2 })
+        drawPoints({ position: fgPositionRef.current, aSize: fgSizeRef.current, aAlpha: fgAlphaRef.current, aSeed: fgSeedRef.current, count: t.count, uColor: [1.0, 0.65, 0.0], uJitterAmp: 0.002, uSizeScale: 1.0, uMaxSizePx: 6.4 })
         if (edgeCountRef.current && edgeCountRef.current <= 8000) { drawLines() }
         const gm = glowMeshRef.current
         if (gm && gm.count) {

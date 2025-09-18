@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 
-export default function Sidebar({ open=true, onToggle, items, onSelect }:{ open?: boolean, onToggle: ()=>void, items: Array<{index:number, group:number, flag?:number, name?:string}>, onSelect: (i:number)=>void }){
+export default function Sidebar({ open=true, onToggle, items, onSelect, onDoubleSelect }:{ open?: boolean, onToggle: ()=>void, items: Array<{index:number, group:number, flag?:number, name?:string, avatarUrl?: string}>, onSelect: (i:number)=>void, onDoubleSelect?: (i:number)=>void }){
   const [isOpen, setIsOpen] = useState(open)
   const toggle = ()=>{ setIsOpen(!isOpen); onToggle() }
   return (
@@ -11,9 +11,21 @@ export default function Sidebar({ open=true, onToggle, items, onSelect }:{ open?
           <div style={{ fontSize:16, marginBottom:10, opacity:0.85 }}>Nodes</div>
           <div style={{ display:'grid', gap:6 }}>
             {items.slice(0,300).map((it)=> (
-              <div key={it.index} onClick={()=>onSelect(it.index)} style={{ padding:'8px 10px', borderRadius:8, background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.08)', cursor:'pointer' }}>
-                <div style={{ fontSize:13, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{it.name || `#${it.index}`}</div>
-                <div style={{ fontSize:11, opacity:0.75 }}>group {it.group}{it.flag!==undefined?` • flags ${it.flag}`:''}</div>
+              <div key={it.index} onClick={()=>onSelect(it.index)} onDoubleClick={()=> onDoubleSelect?.(it.index)} style={{ padding:'8px 10px', borderRadius:8, background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.08)', cursor:'pointer' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  {it.avatarUrl ? (
+                    <img src={it.avatarUrl} alt={it.name || `#${it.index}`}
+                      style={{ width:24, height:24, borderRadius:6, objectFit:'cover', flex:'0 0 auto', background:'rgba(255,255,255,0.1)', border:'1px solid rgba(255,255,255,0.15)' }} />
+                  ) : (
+                    <div style={{ width:24, height:24, borderRadius:6, display:'grid', placeItems:'center', background:'rgba(255,255,255,0.08)', border:'1px solid rgba(255,255,255,0.12)', color:'#fff', fontSize:11 }}>
+                      {(it.name||'')[0]?.toUpperCase() || '#'}
+                    </div>
+                  )}
+                  <div style={{ minWidth:0 }}>
+                    <div style={{ fontSize:13, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{it.name || `#${it.index}`}</div>
+                    <div style={{ fontSize:11, opacity:0.75 }}>group {it.group}{it.flag!==undefined?` • flags ${it.flag}`:''}</div>
+                  </div>
+                </div>
               </div>
             ))}
           </div>
