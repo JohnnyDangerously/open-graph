@@ -4,10 +4,11 @@ import CommandBar from "./ui/CommandBar";
 import HUD from "./ui/HUD";
 import Settings from "./ui/Settings";
 import Sidebar from "./ui/Sidebar";
-import { setApiConfig } from "./lib/api";
+import { setApiConfig, fetchBridgesTileJSON } from "./lib/api";
 import { resolveSmart, loadTileSmart } from "./smart";
 // demo modules removed
 import type { ParsedTile } from "./graph/parse";
+import { parseJsonTile } from "./graph/parse";
 
 type SceneRef = { setForeground: (fg: any, opts?: { noTrailSnapshot?: boolean }) => void; clear: () => void, promoteTrailPrevious?: ()=>boolean };
 
@@ -59,10 +60,49 @@ export default function App(){
       try { (sceneRef.current as any)?.focusIndex?.(0, { animate:true, ms:420, zoom: 2.0 }) } catch {}
       return
     }
+    // Bridges mode: "bridges <companyA> + <companyB>"
+    if (/^bridges\b/i.test(s)) {
+      const raw = s.replace(/^bridges\s*/i, '')
+      const parts = raw.split('+').map(t => t.trim()).filter(Boolean)
+      if (parts.length !== 2) { setErr('Bridges expects two companies, e.g. "bridges Acme + Globex"'); return }
+      const [aIn, bIn] = parts
+      const [aId, bId] = await Promise.all([resolveSmart(aIn), resolveSmart(bIn)])
+      if (!aId || !bId || !aId.startsWith('company:') || !bId.startsWith('company:')) { setErr('Both sides must resolve to company:<id>. Try exact names or a domain.'); return }
+      try {
+        setErr(null)
+        setFocus(`${aId} bridges ${bId}`)
+        const j = await fetchBridgesTileJSON(aId, bId, 180)
+        const tile = parseJsonTile(j as any)
+        try { if ((j as any).labels) setLabels((j as any).labels) } catch {}
+        try {
+          const av = new Array(tile.count).fill('').map((_, i)=>{
+            const lab = (j as any).labels?.[i] || `#${i}`
+            const seed = encodeURIComponent(lab)
+            return `https://api.dicebear.com/7.x/thumbs/svg?seed=${seed}`
+          })
+          setAvatars(av)
+        } catch {}
+        sceneRef.current?.setForeground(tile as any)
+        // Nudge camera slightly
+        try { (sceneRef.current as any)?.focusIndex?.(0, { animate:true, ms:420, zoom: 1.6 }) } catch {}
+        return
+      } catch (e:any) {
+        setErr(e?.message || 'bridges failed')
+        return
+      }
+    }
     // Compare mode: "<a> + <b>" or "compare <a> + <b>"
     if (/\+/.test(s)) {
       await runCompare(s);
       return;
+    }
+    if (/^suggest\s+best\s+compare$/i.test(s)){
+      try {
+        const best = await suggestBestPair()
+        if (best) { await run(`compare ${best.a} + ${best.b}`); return }
+        setErr('No suitable pair found in a quick scan.')
+      } catch (e:any) { setErr(e?.message || 'suggest failed') }
+      return
     }
     const m = /^show\s+(.+)$/.exec(s);
     let id = (m ? m[1] : s).trim();
@@ -128,6 +168,39 @@ export default function App(){
     }
   }
 
+  async function suggestBestPair(): Promise<{ a:string, b:string } | null> {
+    // Quick heuristic: try last few history items and a few hard-coded seeds
+    const seeds = new Set<string>()
+    for (let i=Math.max(0, history.length-6); i<history.length; i++) seeds.add(history[i].id)
+    // If nothing in history, try some labels from current sidebar
+    for (let i=0;i<Math.min(labels.length, 20);i++){ const name = labels[i]; if (name) seeds.add(`person:${name}`) }
+    const arr = Array.from(seeds).slice(0, 6)
+    if (arr.length < 2) return null
+    let best: any = null
+    for (let i=0;i<arr.length;i++) for (let j=i+1;j<arr.length;j++){
+      try {
+        const [A, B] = await Promise.all([resolveSmart(arr[i]), resolveSmart(arr[j])])
+        if (!A || !B) continue
+        if (A === B) continue
+        const [{ tile: aTile }, { tile: bTile }] = await Promise.all([loadTileSmart(A), loadTileSmart(B)])
+        const da = degreesFor(aTile as any, { workOnly:true, minYears:24 })
+        const db = degreesFor(bTile as any, { workOnly:true, minYears:24 })
+        const m1 = intersectCount(da.firstIds, db.firstIds)
+        const m2 = intersectCount(da.secondIds, db.secondIds)
+        const cAB = intersectCount(da.firstIds, db.secondIds)
+        const cBA = intersectCount(db.firstIds, da.secondIds)
+        const aOnly = diffCount(new Set([...da.firstIds, ...da.secondIds]), new Set([...db.firstIds, ...db.secondIds]))
+        const bOnly = diffCount(new Set([...db.firstIds, ...db.secondIds]), new Set([...da.firstIds, ...da.secondIds]))
+        const score = m1*3 + m2*2 + Math.min(cAB, cBA) - Math.abs(aOnly - bOnly)*0.5
+        if (!best || score > best.score) best = { a:A, b:B, score }
+      } catch {}
+    }
+    return best ? { a: best.a, b: best.b } : null
+  }
+
+  function intersectCount(a:Set<string>, b:Set<string>){ let k=0; for (const x of a) if (b.has(x)) k++; return k }
+  function diffCount(a:Set<string>, b:Set<string>){ let k=0; for (const x of a) if (!b.has(x)) k++; return k }
+
   // --- Compare Mode Implementation ---
   function nodeIdFor(tile: any, i: number): string {
     const meta = tile?.meta?.nodes?.[i]
@@ -155,27 +228,21 @@ export default function App(){
     const count = tile.count|0
     const edges = tile.edges || new Uint16Array(0)
     const weights: (Float32Array | Uint8Array | undefined) = (tile as any).edgeWeights
-    const nodeFlags: Uint8Array | undefined = (tile as any).flags
 
     const neighbors: number[][] = Array.from({ length: count }, () => [])
     const mAll = edges.length >>> 1
     const minYears = Math.max(0, Math.floor(opts?.minYears ?? 0))
-    const WORK_BIT = 2
+
     for (let i=0;i<mAll;i++){
       const a = edges[i*2]|0, b = edges[i*2+1]|0
       if (a>=count || b>=count) continue
       let keep = true
       if (opts?.workOnly){
+        // STRICT: require explicit edgeWeights and meet threshold; otherwise drop
         keep = false
-        // Prefer explicit weight threshold if provided in edgeWeights (assume years)
         if (weights && (weights as any).length === mAll){
-          const w = (weights as any)[i] as number
+          const w = Number((weights as any)[i])
           if (Number.isFinite(w) && w >= minYears) keep = true
-        }
-        // Fallback to node flags (work bit) when weights unavailable
-        if (!keep && nodeFlags){
-          const hasWork = (((nodeFlags[a]||0) & WORK_BIT) !== 0) || (((nodeFlags[b]||0) & WORK_BIT) !== 0)
-          if (hasWork) keep = true
         }
       }
       if (keep){ neighbors[a].push(b); neighbors[b].push(a) }
@@ -183,7 +250,7 @@ export default function App(){
     const first: number[] = Array.from(new Set(neighbors[0]||[])).filter(i=>i>0)
     const seen = new Set<number>([0, ...first])
     const second: number[] = []
-    for (const f of first){ for (const n of neighbors[f]){ if (!seen.has(n)){ seen.add(n); if (n>0) second.push(n) } } }
+    for (const f of first){ for (const n of neighbors[f]||[]){ if (!seen.has(n)){ seen.add(n); if (n>0) second.push(n) } } }
     const firstIds = new Set<string>(first.map(i=>nodeIdFor(tile as any, i)))
     const secondIds = new Set<string>(second.map(i=>nodeIdFor(tile as any, i)))
     return { first, second, firstIds, secondIds }
@@ -237,6 +304,21 @@ export default function App(){
     const bF1_aF2 = Array.from(degB.firstIds).filter(id=>degA.secondIds.has(id) && !degA.firstIds.has(id))
     const aOnly = Array.from(new Set<string>([...degA.firstIds, ...degA.secondIds])).filter(id=>!degB.firstIds.has(id) && !degB.secondIds.has(id))
     const bOnly = Array.from(new Set<string>([...degB.firstIds, ...degB.secondIds])).filter(id=>!degA.firstIds.has(id) && !degA.secondIds.has(id))
+
+    // Sanity diagnostics: if strict work-only graph is empty, surface a clear message instead of drawing nothing
+    const totalCats = degA.first.length + degA.second.length + degB.first.length + degB.second.length
+    if (totalCats === 0) {
+      try { setErr('No work-overlap edges (>=24 months) found for either ego. Please choose another pair or relax the threshold.'); } catch {}
+    } else {
+      try {
+        console.log('Compare(work-only):', {
+          A: { first: degA.first.length, second: degA.second.length },
+          B: { first: degB.first.length, second: degB.second.length },
+          mutual: { first: mutualF1.length, second: mutualF2.length },
+          cross: { A1_B2: aF1_bF2.length, B1_A2: bF1_aF2.length }
+        })
+      } catch {}
+    }
 
     // Map id -> source tile and original index to get labels
     const labelFor = (id:string)=> mapA.get(id) || mapB.get(id) || id
@@ -435,6 +517,7 @@ export default function App(){
       const [aIn, bIn] = parts
       const [aId, bId] = await Promise.all([resolveSmart(aIn), resolveSmart(bIn)])
       if (!aId || !bId) { setErr('Could not resolve one or both ids for compare.'); return }
+      if (aId === bId) { setErr('Please choose two different people to compare.'); return }
       setErr(null)
       setFocus(`${aId} + ${bId}`)
       const [{ tile: aTile }, { tile: bTile }] = await Promise.all([loadTileSmart(aId), loadTileSmart(bId)])
@@ -560,7 +643,7 @@ export default function App(){
         {jobFilter && <button onClick={()=> setJobFilter(null)} style={{ padding:'6px 10px', borderRadius:8, background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.2)' }}>Clear</button>}
       </div>
       <CommandBar onRun={run} />
-      <HUD focus={focus} nodes={nodeCount} fps={fps} selectedIndex={selectedIndex} concentric={concentric} onToggleConcentric={()=>setConcentric(c=>!c)} onSettings={()=>setShowSettings(true)} onBack={()=>{ if(cursor>0 && history[cursor]){ const cur=history[cursor]; const prev=history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); run(prev.id, { pushHistory:false, overrideMove:{ x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) } }} onForward={()=>{ if(cursor<history.length-1){ const next=history[cursor+1]; setCursor(cursor+1); if (next?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: next.turn||0 } })); run(next.id, { pushHistory:false, overrideMove:{ x: next?.move?.x||0, y: next?.move?.y||0 } }) } }} canBack={cursor>0} canForward={cursor<history.length-1} />
+      <HUD focus={focus} nodes={nodeCount} fps={fps} selectedIndex={selectedIndex} concentric={concentric} onToggleConcentric={()=>setConcentric(c=>!c)} onSettings={()=>setShowSettings(true)} onBack={()=>{ if(cursor>0 && history[cursor]){ const cur=history[cursor]; const prev=history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); run(prev.id, { pushHistory:false, overrideMove:{ x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) } }} onForward={()=>{ if(cursor<history.length-1){ const next=history[cursor+1]; setCursor(cursor+1); if (next?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: next.turn||0 } })); run(next.id, { pushHistory:false, overrideMove:{ x: next?.move?.x||0, y: next?.move?.y||0 } }) } }} canBack={cursor>0} canForward={cursor<history.length-1} onReshape={(mode)=>{ (sceneRef.current as any)?.reshapeLayout?.(mode, { animate:true, ms:520 }) }} />
       {/* demo buttons removed */}
       {err && (
         <div style={{ position:'absolute', top:52, left:12, right:12, padding:'10px 12px', background:'rgba(200,40,60,0.2)', border:'1px solid rgba(255,80,100,0.35)', color:'#ffbfc9', borderRadius:10, zIndex:11 }}>

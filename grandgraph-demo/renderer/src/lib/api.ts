@@ -565,3 +565,139 @@ export async function fetchCompanyEgoJSON(id: string, limit = 1500){
   ))
   return { meta: { nodes: metaNodes }, coords: { nodes, edges } }
 }
+
+// Bridges query between two companies (left, right)
+// Returns a JSON tile shape consumable by parseJsonTile
+export async function fetchBridgesTileJSON(companyAId: string, companyBId: string, limit = 120){
+  const base = getApiBase()
+  if (!companyAId.startsWith('company:') || !companyBId.startsWith('company:')) throw new Error('bridges requires company:<id> + company:<id>')
+  const a = companyAId.replace(/^company:/,'')
+  const b = companyBId.replace(/^company:/,'')
+
+  // Helper to fetch a single scalar
+  const fetchOne = async (sql: string) => {
+    const r = await fetch(`${base}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
+    const t = await r.text()
+    const row = t.trim().split('\n').filter(Boolean)[0]
+    return row ? JSON.parse(row) : null
+  }
+
+  // Company labels
+  const [rowA, rowB] = await Promise.all([
+    fetchOne(`SELECT anyLast(name) AS name FROM via_test.companies_large WHERE company_id_64 = toUInt64(${a}) LIMIT 1`),
+    fetchOne(`SELECT anyLast(name) AS name FROM via_test.companies_large WHERE company_id_64 = toUInt64(${b}) LIMIT 1`)
+  ])
+  const nameA = rowA?.name || `Company ${a}`
+  const nameB = rowB?.name || `Company ${b}`
+
+  // Build a balanced bridge score using overlap >= 24 months
+  // We restrict to candidates that touch S or T and compute NS/NT counts.
+  const sql = `
+    WITH
+      S AS (
+        SELECT toUInt64(person_id_64) AS id
+        FROM via_test.stints_large
+        WHERE company_id = toUInt64(${a})
+          AND (end_date IS NULL OR toDate(end_date) >= today())
+        GROUP BY id
+      ),
+      T AS (
+        SELECT toUInt64(person_id_64) AS id
+        FROM via_test.stints_large
+        WHERE company_id = toUInt64(${b})
+          AND (end_date IS NULL OR toDate(end_date) >= today())
+        GROUP BY id
+      ),
+      overlap_pairs AS (
+        SELECT
+          toUInt64(a.person_id_64) AS u,
+          toUInt64(b.person_id_64) AS v,
+          sum(greatest(0, dateDiff('day',
+                greatest(toDate(a.start_date), toDate(b.start_date)),
+                least(toDate(ifNull(a.end_date, today())), toDate(ifNull(b.end_date, today())))
+          ))) AS days
+        FROM via_test.stints_large AS a
+        INNER JOIN via_test.stints_large AS b ON a.company_id = b.company_id
+        WHERE a.person_id_64 <> b.person_id_64
+        GROUP BY u, v
+        HAVING days >= 720
+      ),
+      deg_s AS (
+        SELECT m, count() AS NS FROM (
+          SELECT if(u IN (SELECT id FROM S), v, u) AS m
+          FROM overlap_pairs
+          WHERE u IN (SELECT id FROM S) OR v IN (SELECT id FROM S)
+        ) q GROUP BY m
+      ),
+      deg_t AS (
+        SELECT m, count() AS NT FROM (
+          SELECT if(u IN (SELECT id FROM T), v, u) AS m
+          FROM overlap_pairs
+          WHERE u IN (SELECT id FROM T) OR v IN (SELECT id FROM T)
+        ) q GROUP BY m
+      ),
+      combined AS (
+        SELECT COALESCE(ds.m, dt.m) AS m, COALESCE(NS,0) AS NS, COALESCE(NT,0) AS NT
+        FROM deg_s ds FULL OUTER JOIN deg_t dt ON ds.m = dt.m
+      ),
+      scored AS (
+        SELECT m, NS, NT, sqrt(toFloat64(NS) * toFloat64(NT)) AS score
+        FROM combined
+        WHERE NS > 0 AND NT > 0
+        ORDER BY score DESC
+        LIMIT ${Math.max(10, Math.min(500, limit))}
+      )
+    SELECT toString(s.m) AS m,
+           s.NS AS NS,
+           s.NT AS NT,
+           s.score AS score,
+           anyLast(p.name) AS name
+    FROM scored s
+    LEFT JOIN via_test.persons_large p ON p.person_id_64 = toUInt64(s.m)
+    GROUP BY m, NS, NT, score
+    ORDER BY score DESC
+  `
+
+  // Use POST (body = raw SQL). Put default_format on the URL to avoid it being parsed as SQL
+  const res = await fetch(`${base}/?default_format=JSONEachRow`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain; charset=utf-8', ...authHeaders() },
+    body: sql,
+    mode: 'cors'
+  })
+  if (!res.ok) { const t = await res.text().catch(()=>'' as any); throw new Error(`bridges query failed ${res.status}: ${t.slice(0,200)}`) }
+  const txt = await res.text()
+  const rows = txt.trim() ? txt.trim().split('\n').map(l=>JSON.parse(l)) : [] as Array<{ m:string, NS:number, NT:number, score:number, name?:string }>
+
+  // Layout: left center, right center, middle grid of bridges
+  const count = 2 + rows.length
+  const nodes: Array<[number,number]> = new Array(count)
+  const edges: Array<[number,number,number]> = []
+  // centers
+  const leftX = -480, rightX = 480, centerY = 0
+  nodes[0] = [leftX, centerY]
+  nodes[1] = [rightX, centerY]
+  // middle layout: jittered grid
+  const cols = Math.max(3, Math.ceil(Math.sqrt(rows.length)))
+  const spacing = 120
+  for (let i=0;i<rows.length;i++){
+    const r = rows[i]
+    const c = i % cols
+    const row = Math.floor(i / cols)
+    const x = (c - (cols-1)/2) * spacing + (Math.random()*2-1)*24
+    const y = (row - (Math.ceil(rows.length/cols)-1)/2) * spacing + (Math.random()*2-1)*24
+    nodes[2 + i] = [x, y]
+    edges.push([0, 2 + i, r.NS|0])
+    edges.push([1, 2 + i, r.NT|0])
+  }
+
+  const metaNodes = new Array(count).fill(0).map((_, i)=>{
+    if (i===0) return { id: String(a), name: nameA, full_name: nameA, title: null, group: 0, flags: 0 }
+    if (i===1) return { id: String(b), name: nameB, full_name: nameB, title: null, group: 0, flags: 0 }
+    const r = rows[i-2]
+    return { id: String(r?.m||i), name: String(r?.name||''), full_name: String(r?.name||''), title: null, group: 0, flags: 0 }
+  })
+
+  const labels = metaNodes.map(n=> String((n as any).name || (n as any).id || ''))
+  return { meta: { nodes: metaNodes }, coords: { nodes, edges }, labels }
+}

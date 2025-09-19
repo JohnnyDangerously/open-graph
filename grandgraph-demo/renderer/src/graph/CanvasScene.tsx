@@ -1,7 +1,7 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type { ParsedTile } from './parse'
 
-type Exposed = { setForeground: (fg: ParsedTile) => void, clear: () => void, focusIndex: (index: number, opts?:{ zoom?: number, zoomMultiplier?: number, animate?: boolean, ms?: number }) => void }
+type Exposed = { setForeground: (fg: ParsedTile, opts?: { noTrailSnapshot?: boolean }) => void, clear: () => void, focusIndex: (index: number, opts?:{ zoom?: number, zoomMultiplier?: number, animate?: boolean, ms?: number }) => void, reshapeLayout: (mode: 'hierarchy'|'radial'|'grid'|'concentric', opts?:{ animate?: boolean, ms?: number }) => void, promoteTrailPrevious?: ()=>boolean }
 type Props = { 
   onStats?: (fps: number, count: number) => void, 
   concentric?: boolean, 
@@ -236,6 +236,105 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       const { width:w, height:h } = getCanvasLogicalSize()
       console.log('focusIndex:', { index, targetScale, canvasSize: `${w}x${h}`, nodeWorld: { x:n.x, y:n.y } })
       centerOnWorld(n.x, n.y, { zoom: targetScale, animate: !!opts?.animate, ms: opts?.ms })
+    },
+    reshapeLayout: (mode, opts)=>{
+      const t = tileRef.current
+      if (!t) return
+      const n = t.count|0
+      const edges = (t as any).edges as Uint32Array | undefined
+      const from = new Float32Array(t.nodes)
+      const target = new Float32Array(from.length)
+      const placeGrid = ()=>{
+        const cols = Math.max(1, Math.ceil(Math.sqrt(n)))
+        const cell = 160
+        for (let i=0;i<n;i++){
+          const r = Math.floor(i/cols), c = i%cols
+          target[i*2] = (c - (cols-1)/2) * cell
+          target[i*2+1] = (r - Math.floor((n-1)/cols)/2) * cell
+        }
+      }
+      const placeRadial = ()=>{
+        // BFS levels if edges exist; else ring by index
+        const level = new Array<number>(n).fill(0)
+        if (edges && edges.length>=2){
+          const adj: number[][] = Array.from({length:n},()=>[])
+          for (let i=0;i<edges.length;i+=2){ const a=edges[i]|0, b=edges[i+1]|0; if (a<n&&b<n){ adj[a].push(b); adj[b].push(a) } }
+          const q=[0]; const vis=new Array(n).fill(false); vis[0]=true
+          while(q.length){ const u=q.shift()!; for(const v of adj[u]) if(!vis[v]){ vis[v]=true; level[v]=level[u]+1; q.push(v) } }
+        }
+        const maxL = level.reduce((a,b)=>Math.max(a,b),0)
+        let idx=0
+        for (let L=0; L<=Math.max(1,maxL); L++){
+          const ring = [] as number[]
+          for (let i=0;i<n;i++) if (level[i]===L) ring.push(i)
+          if (ring.length===0) continue
+          const R = 120 + L*180
+          for (let k=0;k<ring.length;k++,idx++){
+            const ang = (k / ring.length) * Math.PI * 2
+            target[ring[k]*2] = Math.cos(ang)*R
+            target[ring[k]*2+1] = Math.sin(ang)*R
+          }
+        }
+        // any not placed
+        for (let i=0;i<n;i++) if (target[i*2]===0 && target[i*2+1]===0 && i!==0){ const R=300+ (i%5)*80; const a=(i%360)*(Math.PI/180); target[i*2]=Math.cos(a)*R; target[i*2+1]=Math.sin(a)*R }
+      }
+      const placeHierarchy = ()=>{
+        const level = new Array<number>(n).fill(0)
+        const children: number[][] = Array.from({length:n},()=>[])
+        if (edges && edges.length>=2){
+          const adj: number[][] = Array.from({length:n},()=>[])
+          for (let i=0;i<edges.length;i+=2){ const a=edges[i]|0, b=edges[i+1]|0; if (a<n&&b<n){ adj[a].push(b); adj[b].push(a) } }
+          const q=[0]; const vis=new Array(n).fill(false); vis[0]=true
+          while(q.length){ const u=q.shift()!; for(const v of adj[u]) if(!vis[v]){ vis[v]=true; level[v]=level[u]+1; children[u].push(v); q.push(v) } }
+        }
+        const maxL = level.reduce((a,b)=>Math.max(a,b),0)
+        const layerGap = 180
+        for (let L=0; L<=Math.max(1,maxL); L++){
+          const nodesInLayer = [] as number[]
+          for (let i=0;i<n;i++) if (level[i]===L) nodesInLayer.push(i)
+          const W = Math.max(1, nodesInLayer.length)
+          for (let k=0;k<nodesInLayer.length;k++){
+            const i = nodesInLayer[k]
+            const x = (k - (W-1)/2) * 160
+            const y = L * layerGap
+            target[i*2] = x
+            target[i*2+1] = y
+          }
+        }
+      }
+      const placeConcentric = ()=>{
+        const rings = [120, 300, 480]
+        let idx=0
+        for (let r=0;r<rings.length;r++){
+          const ringCount = Math.min(n-idx, r===0?Math.min(12,n): r===1?Math.min(36, n-idx): (n-idx))
+          for (let i=0;i<ringCount;i++,idx++){
+            const ang = (i / Math.max(1,ringCount)) * Math.PI * 2
+            target[idx*2] = Math.cos(ang)*rings[r]
+            target[idx*2+1] = Math.sin(ang)*rings[r]
+          }
+        }
+        for (;idx<n;idx++){ const ang = (idx/Math.max(1,n))*Math.PI*2; target[idx*2]=Math.cos(ang)*600; target[idx*2+1]=Math.sin(ang)*600 }
+      }
+      if (mode==='grid') placeGrid(); else if (mode==='hierarchy') placeHierarchy(); else if (mode==='concentric') placeConcentric(); else placeRadial()
+      const duration = Math.max(120, Math.min(1200, opts?.ms || 520))
+      if (opts?.animate){
+        const start = performance.now()
+        const step = (now:number)=>{
+          const t = Math.min(1, (now - start)/duration)
+          const e = t<0.5 ? 2*t*t : -1 + (4 - 2*t)*t
+          const cur = new Float32Array(from.length)
+          for (let i=0;i<from.length;i++) cur[i] = from[i] + (target[i] - from[i]) * e
+          const next: any = { ...(tileRef.current as any) }
+          next.nodes = cur
+          setTile(next)
+          if (t < 1) requestAnimationFrame(step)
+        }
+        requestAnimationFrame(step)
+      } else {
+        const next: any = { ...(tileRef.current as any) }
+        next.nodes = target
+        setTile(next)
+      }
     }
   }), [])
 
