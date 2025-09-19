@@ -246,7 +246,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
           z = (dir[2] + jitter) * R
         } else {
           // Force core
-          const d = uniformDir(); const R = radiusCore(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
+            const d = uniformDir(); const R = radiusCore(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
         }
         const r0 = Math.hypot(x, y, z) || 1e-6;
         const aBite = biteAmount(x, y, z);
@@ -399,11 +399,13 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       uniform vec3  u_color;
       uniform float u_jitterAmp;
       uniform vec2  u_shiftClip; // small clip-space shift for parallax
+      uniform vec2  u_frontFade; // [start,end] z thresholds to fade near camera
       varying float v_alpha;
       varying float v_seed;
       varying float v_hubMask;
       varying float v_hubAlpha;
       varying float v_r0;
+      varying float v_viewZ;
 
       float hash11(float p){
         p = fract(p*0.1031);
@@ -426,6 +428,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
         // centered mapping (no offset), so the globe sits in the middle
         vec2 clip = (screen / (0.5 * u_view)) + u_shiftClip;
         gl_Position = vec4(clip, 0.0, 1.0);
+        v_viewZ = pr.z;
         float lp = length(p);
         float shellBoost = smoothstep(0.82, 0.99, lp);
         // shrink points when node count increases so the change is visible
@@ -448,10 +451,12 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       uniform float u_brightness;
       uniform int u_palette;
       uniform float u_rimMax;
+      uniform vec2  u_frontFade;
       varying float v_alpha;
       varying float v_seed;
       varying float v_hubMask;
       varying float v_r0;
+      varying float v_viewZ;
 
       vec3 hsv2rgb(float h, float s, float v){
         vec3 k = vec3(1.0, 2.0/3.0, 1.0/3.0);
@@ -495,6 +500,11 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
         vec3 rimBoost = vec3(0.90, 0.95, 1.0);
         col = mix(vec3(0.78,0.80,0.88), col, rN);
         alpha *= mix(0.85, 1.20, rN);
+        // Fade points near the camera (positive view-space z)
+        float frontMask = 1.0 - smoothstep(u_frontFade.x, u_frontFade.y, v_viewZ);
+        // Weight fade by how close to surface to emphasize front shell removal
+        float surfaceW = smoothstep(0.30, 0.86, v_r0);
+        alpha *= mix(1.0, frontMask, surfaceW);
         gl_FragColor = vec4(col, alpha);
       }
       `,
@@ -515,7 +525,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
         },
         u_pointPx: () => cfg.pointSizePx,
         u_pointScale: () => sizeScaleRef.current,
-        u_rotSpeed: () => (asBackground ? (bgRotSpeed || 0.0) : rotSpeedRef.current),
+        u_rotSpeed: () => (asBackground ? Math.max(0.0, Math.min(0.05, bgRotSpeed || 0.0)) : rotSpeedRef.current),
         u_jitterAmp: () => (asBackground ? 0.0 : 0.0035),
         u_nodeScale: () => nodeScaleRef.current,
         u_glow: () => cfg.glow,
@@ -525,11 +535,12 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
         u_rimMax: () => 0.846,
         u_shiftClip: ({ viewportWidth, viewportHeight }: any) => {
           // Convert px/py (pixels) to clip offset and dampen heavily for subtlety
-          const k = 0.06
+          const k = 0.10
           const sx = (pxRef.current || 0) / (0.5 * (viewportWidth  || 1))
           const sy = (pyRef.current || 0) / (0.5 * (viewportHeight || 1))
           return [ -k * sx, -k * sy ]
-        }
+        },
+        u_frontFade: () => (asBackground ? [0.10, 0.40] : [10.0, 11.0])
       },
       count: () => filledRef.current,
       primitive: 'points',
@@ -549,6 +560,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       uniform float u_rotSpeed;
       varying float v_a;
       varying float v_r;
+      varying float v_eViewZ;
       void main(){
         float cy = cos(u_time*u_rotSpeed), sy = sin(u_time*u_rotSpeed);
         mat3 ry = mat3(cy,0.0,sy, 0.0,1.0,0.0, -sy,0.0,cy);
@@ -560,6 +572,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
         gl_Position = vec4(clip, 0.0, 1.0);
         float r = length(a_pos);
         v_r = r;
+        v_eViewZ = pr.z;
         // strong visibility baseline
         v_a = 0.85; // baseline, scaled by uniform in fragment
       }`,
@@ -567,13 +580,22 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       precision highp float;
       varying float v_a;
       varying float v_r;
+      varying float v_eViewZ;
       uniform float u_centerCut;
       uniform float u_edgeAlpha;
       uniform vec3  u_edgeColor;
       uniform float u_globalBrightness;
+      uniform vec2  u_frontFade;
+      uniform float u_frontCut;
+      uniform float u_frontRadMin;
       void main(){
+        // Hard cull only the very front OUTER shell, keep interior connections
+        if (v_eViewZ > u_frontCut && v_r > u_frontRadMin) discard;
         float suppress = smoothstep(u_centerCut - 0.06, u_centerCut + 0.03, v_r);
         float a = v_a * suppress * u_edgeAlpha * clamp(u_globalBrightness, 0.2, 2.5); // radius-gated and user-scaled
+        // Hide edges near front of sphere
+        float frontMask = 1.0 - smoothstep(u_frontFade.x, u_frontFade.y, v_eViewZ);
+        a *= frontMask;
         gl_FragColor = vec4(u_edgeColor, a);
       }`,
       attributes: { a_pos: { buffer: edgeBuf, size: 3 } },
@@ -586,11 +608,18 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
           const c = Math.cos(tiltRef.current), s = Math.sin(tiltRef.current);
           return [1, 0, 0, 0, c, -s, 0, s, c];
         },
+<<<<<<< HEAD
         u_rotSpeed: () => (asBackground ? (bgRotSpeed || 0.0) : rotSpeedRef.current),
+=======
+        u_rotSpeed: () => (asBackground ? Math.max(0.0, Math.min(0.05, bgRotSpeed || 0.0)) : rotSpeedRef.current),
+>>>>>>> a1efe64 (chore: commit via assistant on 2025-09-19T05:53:29Z)
         u_centerCut: () => 0.45,
         u_edgeAlpha: () => (asBackground ? edgeAlphaRef.current * 0.5 : edgeAlphaRef.current),
         u_edgeColor: () => edgeColorRef.current,
         u_globalBrightness: () => brightnessRef.current,
+        u_frontFade: () => (asBackground ? [0.10, 0.40] : [10.0, 11.0]),
+        u_frontCut: () => (asBackground ? 0.06 : 99.0),
+        u_frontRadMin: () => (asBackground ? 0.70 : 2.0),
       },
       count: () => Math.max(0, Math.floor(edgeCount * Math.max(0.0, Math.min(1.0, (asBackground ? edgeFractionRef.current * 0.3 : edgeFractionRef.current)))) * 2),
       primitive: 'lines',
@@ -601,13 +630,13 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
     // removed drawLines pass
 
     const loop = () => {
-      if (!bgPaused) {
-        regl.poll();
-        regl.clear({ color: [cfg.background[0], cfg.background[1], cfg.background[2], 1], depth: 1 });
-        drawOuter();
-        if (edgeCount > 0 && (isDense || showEdges || asBackground)) drawEdges();
-        draw();
-      }
+      regl.poll();
+      regl.clear({ color: [cfg.background[0], cfg.background[1], cfg.background[2], 1], depth: 1 });
+      drawOuter();
+      if (edgeCount > 0 && (isDense || showEdges || asBackground)) drawEdges();
+      draw();
+      // If background is paused, draw once and stop scheduling frames
+      if (asBackground && bgPaused) { rafRef.current = null; return }
       rafRef.current = requestAnimationFrame(loop);
     };
     loop();
@@ -634,23 +663,23 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
     // Company tag animation system (disabled in background mode)
     let tagRafId: number | null = null;
     if (!asBackground) {
-      const updateCompanyTags = () => {
-        const now = performance.now();
-        setCompanyTags(prev => {
-          const active = prev.filter(tag => now - tag.startTime < 5000);
+    const updateCompanyTags = () => {
+      const now = performance.now();
+      setCompanyTags(prev => {
+        const active = prev.filter(tag => now - tag.startTime < 5000);
           if (active.length < 5 && Math.random() < 0.02) {
-            const company = companies[Math.floor(Math.random() * companies.length)];
-            const canvas = canvasRef.current;
-            if (canvas) {
+          const company = companies[Math.floor(Math.random() * companies.length)];
+          const canvas = canvasRef.current;
+          if (canvas) {
               const newTag = { id: Math.random(), company, x: 0.2 + Math.random() * 0.6, y: 0.2 + Math.random() * 0.6, startTime: now, angle: Math.random() * Math.PI * 2 };
-              return [...active, newTag];
-            }
+            return [...active, newTag];
           }
-          return active;
-        });
-        tagRafId = requestAnimationFrame(updateCompanyTags);
-      };
-      updateCompanyTags();
+        }
+        return active;
+      });
+      tagRafId = requestAnimationFrame(updateCompanyTags);
+    };
+    updateCompanyTags();
     }
 
     // Start non-blocking data generation and update buffers incrementally
@@ -700,12 +729,12 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
             for (let k = 0; k < 100 * mult && ei < MAX_EDGES; k++) {  // more attempts
               const span = 120 + ((k * 113) % 700);
               const j = (i + span) % M;
-              const x2 = pos0[j * 3], y2 = pos0[j * 3 + 1], z2 = pos0[j * 3 + 2];
+            const x2 = pos0[j * 3], y2 = pos0[j * 3 + 1], z2 = pos0[j * 3 + 2];
               const r2 = Math.hypot(x2, y2, z2) || 1e-6;
               if (r2 < CENTER_EDGE_CUT) continue;
               const ux2 = x2 / r2, uy2 = y2 / r2, uz2 = z2 / r2;
               const angular = ux1 * ux2 + uy1 * uy2 + uz1 * uz2; // cos angle
-              const dist = Math.sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1) + (z2-z1)*(z2-z1));
+            const dist = Math.sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1) + (z2-z1)*(z2-z1));
               if (angular > 0.80 && r2 >= r1 && dist < 0.24) {  // relax thresholds
                 if (Math.random() < 0.95) {
                   edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
@@ -908,7 +937,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
             }
           }
         }
- 
+        
         edgeCount = ei;
         if (edgeCount > 0) {
           // Thin edges to ~30% to reduce the red fill (cut ~70%)
@@ -967,7 +996,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       }
       reglRef.current = null;
     };
-  }, [isDense, showEdges, edgeMultiplier, fourCores, nodeScale, sideHole, sectorDensity]);
+  }, [isDense, showEdges, edgeMultiplier, fourCores, nodeScale, sideHole, sectorDensity, bgPaused, bgRotSpeed]);
 
   // Parallax with foreground pans
   useEffect(()=>{
@@ -1005,8 +1034,8 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       const rP = clamp01(dt / 2000);  // rotate gently over full 2s
       const fP = clamp01((dt - 800) / 800); // fade-in flat layer in last 1.2s
 
-      // Zoom in 2x–5x: pick ~3.5x as a good default
-      const z = 700 + 1400 * easeInOutCubic(zP);
+      // Zoom deeper but keep within safe clip bounds
+      const z = 700 + 1800 * easeInOutCubic(zP);
       zoomRef.current = z;
       // Keep tilt near face-on, add a touch of oscillation for life
       const startTiltDeg = 10;
@@ -1029,6 +1058,26 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
 
     requestAnimationFrame(tick);
   };
+
+  // Resume loop when unpausing background
+  useEffect(()=>{
+    if (!asBackground) return
+    if (!bgPaused && !rafRef.current && reglRef.current) {
+      const start = () => {
+        try {
+          const regl = reglRef.current!
+          const drawOuter = ()=>{}
+          const step = () => {
+            regl.poll();
+            regl.clear({ color: [0,0,0,1], depth: 1 });
+            // The main loop established in mount effect will handle drawing
+          }
+          requestAnimationFrame(step)
+        } catch {}
+      }
+      requestAnimationFrame(start)
+    }
+  }, [bgPaused, asBackground])
 
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: asBackground ? 'none' as const : 'auto' as const }}>

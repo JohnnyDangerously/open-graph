@@ -17,7 +17,7 @@ async function createWindow() {
   });
 
   if (isDev) {
-    const devUrl = process.env.ELECTRON_START_URL || "http://127.0.0.1:5173";
+    const devUrl = process.env.ELECTRON_START_URL || "http://127.0.0.1:5174";
     await win.loadURL(devUrl);
     // Keep devtools closed by default; toggle manually if needed
   } else {

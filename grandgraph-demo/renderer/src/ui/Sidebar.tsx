@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 
-export default function Sidebar({ open=true, onToggle, items, onSelect, onDoubleSelect }:{ open?: boolean, onToggle: ()=>void, items: Array<{index:number, group:number, flag?:number, name?:string, avatarUrl?: string}>, onSelect: (i:number)=>void, onDoubleSelect?: (i:number)=>void }){
+export default function Sidebar({ open=true, onToggle, items, onSelect, onDoubleSelect }:{ open?: boolean, onToggle: ()=>void, items: Array<{index:number, group:number, flag?:number, name?:string, title?: string|null, avatarUrl?: string}>, onSelect: (i:number)=>void, onDoubleSelect?: (i:number)=>void }){
   const [isOpen, setIsOpen] = useState(open)
   const toggle = ()=>{ setIsOpen(!isOpen); onToggle() }
   return (
@@ -23,7 +23,7 @@ export default function Sidebar({ open=true, onToggle, items, onSelect, onDouble
                   )}
                   <div style={{ minWidth:0 }}>
                     <div style={{ fontSize:13, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{it.name || `#${it.index}`}</div>
-                    <div style={{ fontSize:11, opacity:0.75 }}>group {it.group}{it.flag!==undefined?` • flags ${it.flag}`:''}</div>
+                    <div style={{ fontSize:11, opacity:0.72, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{it.title || (`group ${it.group}${it.flag!==undefined?` • flags ${it.flag}`:''}`)}</div>
                   </div>
                 </div>
               </div>

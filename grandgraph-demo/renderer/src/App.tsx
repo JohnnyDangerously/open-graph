@@ -6,13 +6,10 @@ import Settings from "./ui/Settings";
 import Sidebar from "./ui/Sidebar";
 import { setApiConfig } from "./lib/api";
 import { resolveSmart, loadTileSmart } from "./smart";
-import TriplesModal from "./ui/TriplesModal";
-import MobilitySankeyDemo from "./ui/MobilitySankeyDemo";
-import PathFindingDemo from "./ui/PathFindingDemo";
-import PeopleNetwork from "./ui/PeopleNetwork";
+// demo modules removed
 import type { ParsedTile } from "./graph/parse";
 
-type SceneRef = { setForeground: (fg: any) => void; clear: () => void };
+type SceneRef = { setForeground: (fg: any, opts?: { noTrailSnapshot?: boolean }) => void; clear: () => void, promoteTrailPrevious?: ()=>boolean };
 
 export default function App(){
   const [focus, setFocus] = useState<string | null>(null);
@@ -22,11 +19,12 @@ export default function App(){
   const [fps, setFps] = useState(60);
   const [nodeCount, setNodeCount] = useState(0);
   const [labels, setLabels] = useState<string[]>([]);
-  const [metaNodes, setMetaNodes] = useState<Array<{ id?: string|number }>>([]);
+  const [metaNodes, setMetaNodes] = useState<Array<{ id?: string|number, title?: string|null }>>([]);
+  const [jobFilter, setJobFilter] = useState<string | null>(null)
   const [avatars, setAvatars] = useState<string[]>([]);
   const [history, setHistory] = useState<Array<{ id: string, move?: { x:number, y:number }, turn?: number }>>([]);
   const [cursor, setCursor] = useState(-1);
-  const [filters, setFilters] = useState({ email:false, work:false, social:false, phone:false });
+  // filters removed
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [apiBase, setApiBase] = useState<string>(()=>{
     try { return localStorage.getItem('API_BASE') || "http://34.192.99.41" } catch { return "http://34.192.99.41" }
@@ -36,65 +34,31 @@ export default function App(){
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [concentric, setConcentric] = useState(false);
-  const [showTriples, setShowTriples] = useState(false);
-  const [showMobility, setShowMobility] = useState(false);
-  const [showPathFinding, setShowPathFinding] = useState(false);
-  const [showPeopleNetwork, setShowPeopleNetwork] = useState(false);
-  const [demoHeight, setDemoHeight] = useState<number>(()=> Math.max(680, Math.floor((typeof window !== 'undefined' ? window.innerHeight : 900) * 0.9)));
+  // demo state removed
   const [spawnDir, setSpawnDir] = useState(0) // 0:N,1:E,2:S,3:W
   const [selectedRegion, setSelectedRegion] = useState<null | 'left' | 'right' | 'overlap'>(null)
   const [sidebarIndices, setSidebarIndices] = useState<number[] | null>(null)
   const [compareGroups, setCompareGroups] = useState<null | { left:number[], right:number[], overlap:number[] }>(null)
   const lastCompareIdsRef = useRef<{ a:string, b:string } | null>(null)
 
-  useEffect(()=>{
-    const onResize = ()=> setDemoHeight(Math.max(680, Math.floor((typeof window !== 'undefined' ? window.innerHeight : 900) * 0.9)));
-    window.addEventListener('resize', onResize);
-    return ()=> window.removeEventListener('resize', onResize);
-  },[]);
+  // demo resize removed
 
-  const demoTriples = React.useMemo(()=>{
-    const person = (name:string, title?:string)=>({ name, title, avatarUrl:`https://api.dicebear.com/7.x/thumbs/svg?seed=${encodeURIComponent(name)}` })
-    return [
-      {
-        left: person('Alex Kim','PM'),
-        middle: person('Jordan Lee','Staff Eng'),
-        right: person('Priya Patel','VP Eng'),
-        scores: { pairLM:0.74, pairMR:0.88, pairLR:0.32, triadicClosure:0.69, transactionalSymmetry:'junior_to_senior' as const, opportunityFit:82, fanIn:91 },
-      },
-      {
-        left: person('Sam Rivera','Founder'),
-        middle: person('Morgan Chen','Director'),
-        right: person('Taylor Brooks','CPO'),
-        scores: { pairLM:0.41, pairMR:0.52, pairLR:0.28, triadicClosure:0.39, transactionalSymmetry:'peer_to_peer' as const, opportunityFit:46, fanIn:55 },
-      },
-      {
-        left: person('Avery Johnson','IC4'),
-        middle: person('Riley Thompson','Sr. Manager'),
-        right: person('Casey Nguyen','Head of Data'),
-        scores: { pairLM:0.91, pairMR:0.85, pairLR:0.63, triadicClosure:0.88, transactionalSymmetry:'junior_to_senior' as const, opportunityFit:94, fanIn:97 },
-        highlighted: true,
-      },
-      {
-        left: person('Jamie Park','BizOps'),
-        middle: person('Chris Adams','Sr. Eng'),
-        right: person('Quinn Bailey','CTO'),
-        scores: { pairLM:0.36, pairMR:0.58, pairLR:0.22, triadicClosure:0.33, transactionalSymmetry:'senior_to_junior' as const, opportunityFit:38, fanIn:49 },
-      },
-      {
-        left: person('Drew Carter','AE'),
-        middle: person('Skylar Green','Solutions'),
-        right: person('Harper Fox','SVP Sales'),
-        scores: { pairLM:0.67, pairMR:0.71, pairLR:0.29, triadicClosure:0.61, transactionalSymmetry:'junior_to_senior' as const, opportunityFit:73, fanIn:84 },
-      }
-    ]
-  },[])
+  // demo triples removed
 
   async function run(cmd: string, opts?: { pushHistory?: boolean, overrideMove?: { x:number, y:number }, turnRadians?: number }){
     const pushHistory = opts?.pushHistory !== false;
     const s = cmd.trim();
     if (!s) return;
     if (s.toLowerCase() === "clear") { sceneRef.current?.clear(); setFocus(null); return; }
+    if (/^(demo\s*venn|venn30|compare\s*demo)$/i.test(s)) {
+      const demo = buildVennDemoTile30()
+      setFocus('demo:venn30')
+      try { setLabels((demo as any).labels || []) } catch {}
+      try { const av = new Array(demo.count).fill('').map((_, i)=>{ const seed = encodeURIComponent((demo as any).labels?.[i] || String(i)); return `https://api.dicebear.com/7.x/thumbs/svg?seed=${seed}` }); setAvatars(av) } catch {}
+      sceneRef.current?.setForeground(demo as any)
+      try { (sceneRef.current as any)?.focusIndex?.(0, { animate:true, ms:420, zoom: 2.0 }) } catch {}
+      return
+    }
     // Compare mode: "<a> + <b>" or "compare <a> + <b>"
     if (/\+/.test(s)) {
       await runCompare(s);
@@ -187,11 +151,35 @@ export default function App(){
     return m
   }
 
-  function degreesFor(tile: ParsedTile){
+  function degreesFor(tile: ParsedTile, opts?: { workOnly?: boolean, minYears?: number }){
     const count = tile.count|0
     const edges = tile.edges || new Uint16Array(0)
+    const weights: (Float32Array | Uint8Array | undefined) = (tile as any).edgeWeights
+    const nodeFlags: Uint8Array | undefined = (tile as any).flags
+
     const neighbors: number[][] = Array.from({ length: count }, () => [])
-    for (let i=0;i<edges.length;i+=2){ const a=edges[i]|0, b=edges[i+1]|0; if (a<count && b<count){ neighbors[a].push(b); neighbors[b].push(a) } }
+    const mAll = edges.length >>> 1
+    const minYears = Math.max(0, Math.floor(opts?.minYears ?? 0))
+    const WORK_BIT = 2
+    for (let i=0;i<mAll;i++){
+      const a = edges[i*2]|0, b = edges[i*2+1]|0
+      if (a>=count || b>=count) continue
+      let keep = true
+      if (opts?.workOnly){
+        keep = false
+        // Prefer explicit weight threshold if provided in edgeWeights (assume years)
+        if (weights && (weights as any).length === mAll){
+          const w = (weights as any)[i] as number
+          if (Number.isFinite(w) && w >= minYears) keep = true
+        }
+        // Fallback to node flags (work bit) when weights unavailable
+        if (!keep && nodeFlags){
+          const hasWork = (((nodeFlags[a]||0) & WORK_BIT) !== 0) || (((nodeFlags[b]||0) & WORK_BIT) !== 0)
+          if (hasWork) keep = true
+        }
+      }
+      if (keep){ neighbors[a].push(b); neighbors[b].push(a) }
+    }
     const first: number[] = Array.from(new Set(neighbors[0]||[])).filter(i=>i>0)
     const seen = new Set<number>([0, ...first])
     const second: number[] = []
@@ -237,8 +225,9 @@ export default function App(){
   }
 
   function buildCompareTile(a: ParsedTile, b: ParsedTile, opts?: { highlight?: 'left'|'right'|'overlap' }){
-    const degA = degreesFor(a)
-    const degB = degreesFor(b)
+    // Compute degrees using work-only edges with 2+ years threshold when available
+    const degA = degreesFor(a, { workOnly:true, minYears:24 })
+    const degB = degreesFor(b, { workOnly:true, minYears:24 })
     const mapA = buildIdLabelMap(a as any)
     const mapB = buildIdLabelMap(b as any)
     // Overlap categories
@@ -251,6 +240,20 @@ export default function App(){
 
     // Map id -> source tile and original index to get labels
     const labelFor = (id:string)=> mapA.get(id) || mapB.get(id) || id
+
+    // Even downsampling helper so we show ~1/2 of nodes per group
+    const sampleEven = <T,>(arr: T[], fraction = 0.5): T[] => {
+      const n = arr.length|0; if (n === 0) return arr
+      const target = Math.max(1, Math.floor(n * fraction))
+      if (target >= n) return arr
+      const step = n / target
+      const out: T[] = []
+      for (let k=0;k<target;k++){
+        const idx = Math.min(n-1, Math.floor(k * step))
+        out.push(arr[idx])
+      }
+      return out
+    }
 
     // Layout params
     // Centers and radii chosen to GUARANTEE overlap for both first and second rings
@@ -276,7 +279,7 @@ export default function App(){
       const raw = gen()
       const pts: Array<{x:number,y:number}> = []
       const pred = opts2.pred || (()=>true)
-      const minDist2 = 9 // keep minimal spacing in world units
+      const minDist2 = 25 // keep minimal spacing in world units (center-out rings)
       for (let k=0;k<raw.length*5 && pts.length<ids.length;k++){
         const p = raw[k % raw.length]
         if (!pred(p.x, p.y)) continue
@@ -288,20 +291,22 @@ export default function App(){
         const p = raw[Math.floor(Math.random()*raw.length)]
         if (pred(p.x,p.y)) pts.push(p)
       }
+      // Center-out ordering: sort by radius from region center
+      const order = pts.map((p,idx)=>({ idx, r: Math.hypot(p.x - cx, p.y - cy) })).sort((a,b)=> a.r - b.r).map(o=>o.idx)
       const highlightRegion = opts?.highlight || null
       const emphasize = (highlightRegion && highlightRegion === opts2.region)
       const ratio = emphasize ? 1.0 : (opts2.ring === 'first' || opts2.ring === 'cross' ? 0.22 : 0.16)
       const maxStrong = Math.ceil(ids.length * ratio)
       const strongEvery = Math.max(1, Math.floor(ids.length / Math.max(1, maxStrong)))
       for (let i=0;i<ids.length;i++){
-        const p = pts[i]
+        const p = pts[order[i] || i]
         const isStrong = (i % strongEvery === 0) || emphasize
         const drawSize = isStrong ? opts2.baseSize : opts2.bgSize
-        const drawAlpha = isStrong ? 0.94 : 0.28
+        const drawAlpha = isStrong ? 0.85 : 0.18
         nodes.push(p.x, p.y)
         size.push(drawSize)
         alpha.push(drawAlpha)
-        labels.push(labelFor(ids[i]))
+        labels.push(labelFor(ids[order[i] || i]))
         indexGroups[opts2.region].push((nodes.length/2)-1)
       }
     }
@@ -317,22 +322,22 @@ export default function App(){
     const inRightSecond = (x:number,y:number)=> dTo(x,y,rightCX,baseCY) > r1 && dTo(x,y,rightCX,baseCY) <= r2 && y <= baseCY
 
     // First-degree unique and mutual
-    addGroupFilled(Array.from(degA.firstIds).filter(id=>!mutualF1.includes(id) && !aF1_bF2.includes(id)), leftCX, baseCY, 0, r1, { baseSize:4.6, bgSize:0.8, region:'left', ring:'first', pred:(x,y)=> inLeftFirst(x,y) && !(inRightFirst(x,y) || inRightSecond(x,y)) })
-    addGroupFilled(Array.from(degB.firstIds).filter(id=>!mutualF1.includes(id) && !bF1_aF2.includes(id)), rightCX, baseCY, 0, r1, { baseSize:4.6, bgSize:0.8, region:'right', ring:'first', pred:(x,y)=> inRightFirst(x,y) && !(inLeftFirst(x,y) || inLeftSecond(x,y)) })
-    addGroupFilled(mutualF1, midCX, baseCY, 0, r1, { baseSize:5.0, bgSize:0.9, region:'overlap', ring:'first', pred:(x,y)=> inLeftFirst(x,y) && inRightFirst(x,y) })
+    addGroupFilled(sampleEven(Array.from(degA.firstIds).filter(id=>!mutualF1.includes(id) && !aF1_bF2.includes(id))), leftCX, baseCY, 0, r1, { baseSize:4.6, bgSize:0.8, region:'left', ring:'first', pred:(x,y)=> inLeftFirst(x,y) && !(inRightFirst(x,y) || inRightSecond(x,y)) })
+    addGroupFilled(sampleEven(Array.from(degB.firstIds).filter(id=>!mutualF1.includes(id) && !bF1_aF2.includes(id))), rightCX, baseCY, 0, r1, { baseSize:4.6, bgSize:0.8, region:'right', ring:'first', pred:(x,y)=> inRightFirst(x,y) && !(inLeftFirst(x,y) || inLeftSecond(x,y)) })
+    addGroupFilled(sampleEven(mutualF1), midCX, baseCY, 0, r1, { baseSize:5.0, bgSize:0.9, region:'overlap', ring:'first', pred:(x,y)=> inLeftFirst(x,y) && inRightFirst(x,y) })
     // Cross ring (first of A that are second of B) and vice versa → place near mid but biased
-    addGroupFilled(aF1_bF2, (leftCX+midCX)/2, baseCY, 0, r1, { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross', pred:(x,y)=> inLeftFirst(x,y) && inRightSecond(x,y) && !inRightFirst(x,y) })
-    addGroupFilled(bF1_aF2, (rightCX+midCX)/2, baseCY, 0, r1, { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross', pred:(x,y)=> inRightFirst(x,y) && inLeftSecond(x,y) && !inLeftFirst(x,y) })
+    addGroupFilled(sampleEven(aF1_bF2), (leftCX+midCX)/2, baseCY, 0, r1, { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross', pred:(x,y)=> inLeftFirst(x,y) && inRightSecond(x,y) && !inRightFirst(x,y) })
+    addGroupFilled(sampleEven(bF1_aF2), (rightCX+midCX)/2, baseCY, 0, r1, { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross', pred:(x,y)=> inRightFirst(x,y) && inLeftSecond(x,y) && !inLeftFirst(x,y) })
 
     // Second-degree
-    addGroupFilled(Array.from(degA.secondIds).filter(id=>!mutualF2.includes(id)), leftCX, baseCY, r1, r2, { baseSize:3.4, bgSize:0.7, region:'left', ring:'second', pred:(x,y)=> inLeftSecond(x,y) && !(inRightFirst(x,y) || inRightSecond(x,y)) })
-    addGroupFilled(Array.from(degB.secondIds).filter(id=>!mutualF2.includes(id)), rightCX, baseCY, r1, r2, { baseSize:3.4, bgSize:0.7, region:'right', ring:'second', pred:(x,y)=> inRightSecond(x,y) && !(inLeftFirst(x,y) || inLeftSecond(x,y)) })
-    addGroupFilled(mutualF2, midCX, baseCY, r1, r2, { baseSize:3.6, bgSize:0.8, region:'overlap', ring:'second', pred:(x,y)=> inLeftSecond(x,y) && inRightSecond(x,y) && !(inLeftFirst(x,y) && inRightFirst(x,y)) })
+    addGroupFilled(sampleEven(Array.from(degA.secondIds).filter(id=>!mutualF2.includes(id))), leftCX, baseCY, r1, r2, { baseSize:3.4, bgSize:0.7, region:'left', ring:'second', pred:(x,y)=> inLeftSecond(x,y) && !(inRightFirst(x,y) || inRightSecond(x,y)) })
+    addGroupFilled(sampleEven(Array.from(degB.secondIds).filter(id=>!mutualF2.includes(id))), rightCX, baseCY, r1, r2, { baseSize:3.4, bgSize:0.7, region:'right', ring:'second', pred:(x,y)=> inRightSecond(x,y) && !(inLeftFirst(x,y) || inLeftSecond(x,y)) })
+    addGroupFilled(sampleEven(mutualF2), midCX, baseCY, r1, r2, { baseSize:3.6, bgSize:0.8, region:'overlap', ring:'second', pred:(x,y)=> inLeftSecond(x,y) && inRightSecond(x,y) && !(inLeftFirst(x,y) && inRightFirst(x,y)) })
 
     // Non-overlapping pools (optional, already covered above as A-only/B-only across rings)
     // Use small jitter around outer radius
-    addGroupFilled(aOnly, leftCX-40, baseCY, r2+10, r2+80, { baseSize:3.8, bgSize:1.6, region:'left' })
-    addGroupFilled(bOnly, rightCX+40, baseCY, r2+10, r2+80, { baseSize:3.8, bgSize:1.6, region:'right' })
+    addGroupFilled(sampleEven(aOnly), leftCX-40, baseCY, r2+10, r2+80, { baseSize:3.8, bgSize:1.6, region:'left' })
+    addGroupFilled(sampleEven(bOnly), rightCX+40, baseCY, r2+10, r2+80, { baseSize:3.8, bgSize:1.6, region:'right' })
 
     const out: ParsedTile = {
       count: nodes.length/2,
@@ -365,6 +370,63 @@ export default function App(){
     return out
   }
 
+  // Tiny in-app demo: 30 nodes distributed across regions with strong overlap
+  function buildVennDemoTile30(): ParsedTile {
+    const leftCX = -160, rightCX = 160, baseCY = 260
+    const r1 = 200, r2 = 360
+    const label = (i:number)=> `#${i}`
+    const nodes: number[] = []
+    const size: number[] = []
+    const alpha: number[] = []
+    const labelsArr: string[] = []
+
+    // Centers (A,B)
+    nodes.push(leftCX, baseCY); size.push(14); alpha.push(1.0); labelsArr.push('A')
+    nodes.push(rightCX, baseCY); size.push(14); alpha.push(1.0); labelsArr.push('B')
+
+    const dTo = (x:number,y:number,cx:number,cy:number)=> Math.hypot(x-cx,y-cy)
+    const inL1 = (x:number,y:number)=> dTo(x,y,leftCX,baseCY) <= r1 && y <= baseCY
+    const inR1 = (x:number,y:number)=> dTo(x,y,rightCX,baseCY) <= r1 && y <= baseCY
+    const inL2 = (x:number,y:number)=> dTo(x,y,leftCX,baseCY) > r1 && dTo(x,y,leftCX,baseCY) <= r2 && y <= baseCY
+    const inR2 = (x:number,y:number)=> dTo(x,y,rightCX,baseCY) > r1 && dTo(x,y,rightCX,baseCY) <= r2 && y <= baseCY
+
+    const pushPts = (n:number, pred:(x:number,y:number)=>boolean, sStrong=5.0, sWeak=2.0)=>{
+      const total = n
+      const pts: Array<{x:number,y:number}> = []
+      const areaSampler = ()=>{ const t=Math.random(); const r=Math.sqrt(t)*(r2-6); const a=Math.random()*Math.PI; const x = (Math.random()<0.5?leftCX:rightCX) + (r*Math.cos(a))*0.9; const y = baseCY - Math.abs(r*Math.sin(a)); return { x, y } }
+      const min2 = 100
+      while (pts.length<total){
+        const p0 = areaSampler(); const x = Math.max(Math.min(p0.x, rightCX+r2), leftCX-r2); const y=p0.y
+        if (!pred(x,y)) continue
+        let ok=true; for (const q of pts){ const dx=x-q.x, dy=y-q.y; if (dx*dx+dy*dy<min2){ ok=false; break } }
+        if (ok) pts.push({x,y})
+      }
+      for (let i=0;i<pts.length;i++){
+        const p = pts[i]; nodes.push(p.x, p.y); const st = (i%3===0)?sStrong:sWeak; size.push(st); alpha.push(0.92); labelsArr.push(label(nodes.length/2))
+      }
+    }
+
+    // Allocate ~28 nodes across regions
+    pushPts(6, (x,y)=> inL1(x,y) && !(inR1(x,y)||inR2(x,y)))         // left-only 1st
+    pushPts(6, (x,y)=> inR1(x,y) && !(inL1(x,y)||inL2(x,y)))         // right-only 1st
+    pushPts(5, (x,y)=> inL1(x,y) && inR1(x,y))                       // mutual 1st
+    pushPts(4, (x,y)=> inL1(x,y) && inR2(x,y) && !inR1(x,y))         // A1 ∩ B2
+    pushPts(4, (x,y)=> inR1(x,y) && inL2(x,y) && !inL1(x,y))         // B1 ∩ A2
+    pushPts(3, (x,y)=> inL2(x,y) && inR2(x,y) && !(inL1(x,y)&&inR1(x,y))) // mutual 2nd
+
+    const out: ParsedTile = {
+      count: nodes.length/2,
+      nodes: new Float32Array(nodes),
+      size: new Float32Array(size),
+      alpha: new Float32Array(alpha),
+      group: new Uint16Array(nodes.length/2),
+    } as any
+    ;(out as any).labels = labelsArr
+    ;(out as any).compareOverlay = { regions:{ left:{ cx:leftCX, cy:baseCY, r1, r2 }, right:{ cx:rightCX, cy:baseCY, r1, r2 }, overlap:{ cx:0, cy:baseCY, r1, r2 } }, colors:{ leftFirst:'rgba(122,110,228,0.30)', leftSecond:'rgba(122,110,228,0.18)', rightFirst:'rgba(122,110,228,0.30)', rightSecond:'rgba(122,110,228,0.18)', overlapFirst:'rgba(255,195,130,0.30)', overlapSecond:'rgba(255,195,130,0.18)' } }
+    ;(out as any).focusWorld = { x: 0, y: baseCY }
+    return out
+  }
+
   async function runCompare(raw: string){
     try {
       const s = raw.replace(/^compare\s*/i,'')
@@ -392,7 +454,7 @@ export default function App(){
       setSelectedRegion(null)
       sceneRef.current?.setForeground(compareTile as any)
       // Zoom in more on load for compare to reduce perceived noise
-      try { (sceneRef.current as any)?.focusIndex?.(0, { animate:true, ms:420, zoom: 1.4 }) } catch {}
+      try { (sceneRef.current as any)?.focusIndex?.(0, { animate:true, ms:480, zoom: 1.9 }) } catch {}
     } catch (e:any) {
       setErr(e?.message || 'compare failed')
     }
@@ -441,7 +503,9 @@ export default function App(){
       // Back navigation
       if (e.key === 'Backspace' && !isTyping) {
         e.preventDefault()
-        if (cursor > 0 && history[cursor]) {
+        // Prefer promoting trail first; if none, use history
+        const promoted = (sceneRef.current as any)?.promoteTrailPrevious?.() || false
+        if (!promoted && cursor > 0 && history[cursor]) {
           const cur = history[cursor]
           const prev = history[cursor-1]
           setCursor(cursor-1)
@@ -451,9 +515,16 @@ export default function App(){
         }
         return
       }
+      // Delete key: promote previously dimmed graph to foreground (no duplication)
+      if ((e.key === 'Delete' || e.key === 'Del') && !isTyping) {
+        e.preventDefault()
+        try { (sceneRef.current as any)?.promoteTrailPrevious?.() } catch {}
+        return
+      }
       if (e.metaKey && (e.key === '[' || e.key === 'BracketLeft')) {
         e.preventDefault()
-        if (cursor > 0 && history[cursor]) { const cur = history[cursor]; const prev = history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); run(prev.id, { pushHistory:false, overrideMove: { x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) }
+        const promoted = (sceneRef.current as any)?.promoteTrailPrevious?.() || false
+        if (!promoted && cursor > 0 && history[cursor]) { const cur = history[cursor]; const prev = history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); run(prev.id, { pushHistory:false, overrideMove: { x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) }
         return
       }
       if (e.metaKey && (e.key === ']' || e.key === 'BracketRight')) {
@@ -468,22 +539,29 @@ export default function App(){
 
   return (
     <div className="w-full h-full" style={{ background: "transparent", color: "white", position:'fixed', inset:0, overflow:'hidden' }}>
-      <CanvasScene ref={sceneRef as any} concentric={concentric} filters={filters} onPick={(i)=>{ setSelectedIndex(i) }} onClear={()=>{ sceneRef.current?.clear(); setFocus(null); }} onStats={(fps,count)=>{ setFps(fps); setNodeCount(count) }} onRegionClick={onRegionClick} />
+      <CanvasScene ref={sceneRef as any} concentric={concentric} selectedIndex={selectedIndex} visibleMask={(metaNodes && jobFilter !== null && jobFilter.trim() !== '') ? metaNodes.map((m, idx)=>{
+        const t = (m?.title || '').toLowerCase()
+        const q = (jobFilter||'').toLowerCase()
+        // Keep center index 0 always visible
+        if (idx === 0) return true
+        return t.includes(q)
+      }) : null} onPick={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate:true, ms:520, zoomMultiplier: 6 }); }} onClear={()=>{ sceneRef.current?.clear(); setFocus(null); }} onStats={(fps,count)=>{ setFps(fps); setNodeCount(count) }} onRegionClick={onRegionClick} />
       <Sidebar 
         open={sidebarOpen} 
         onToggle={()=>setSidebarOpen(!sidebarOpen)} 
-        items={(sidebarIndices ? sidebarIndices : Array.from({length: Math.max(0,nodeCount)},(_,i)=>i)).map((i)=>({ index:i, group:(i%8), name: labels[i], avatarUrl: avatars[i] }))}
+        items={(sidebarIndices ? sidebarIndices : Array.from({length: Math.max(0,nodeCount)},(_,i)=>i)).map((i)=>({ index:i, group:(i%8), name: labels[i], title: (metaNodes[i] as any)?.title || null, avatarUrl: avatars[i] }))}
         onSelect={(i)=>{ setSelectedIndex(i); }} 
-        onDoubleSelect={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate: true, ms: 520, zoomMultiplier: 4 }); setSidebarOpen(false); }} 
+        onDoubleSelect={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate: true, ms: 520, zoomMultiplier: 8 }); setSidebarOpen(false); }} 
       />
-      <CommandBar onRun={run} />
-      <HUD focus={focus} nodes={nodeCount} fps={fps} selectedIndex={selectedIndex} concentric={concentric} onToggleConcentric={()=>setConcentric(c=>!c)} onSettings={()=>setShowSettings(true)} onBack={()=>{ if(cursor>0 && history[cursor]){ const cur=history[cursor]; const prev=history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); run(prev.id, { pushHistory:false, overrideMove:{ x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) } }} onForward={()=>{ if(cursor<history.length-1){ const next=history[cursor+1]; setCursor(cursor+1); if (next?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: next.turn||0 } })); run(next.id, { pushHistory:false, overrideMove:{ x: next?.move?.x||0, y: next?.move?.y||0 } }) } }} canBack={cursor>0} canForward={cursor<history.length-1} filters={filters} onToggleFilter={(k)=>setFilters(f=>({ ...f, [k]: !f[k] }))} />
-      <div style={{ position:'absolute', left:0, right:0, top:56, display:'flex', justifyContent:'center', gap:10, zIndex:15 }}>
-        <button onClick={()=>setShowTriples(true)} style={{ padding:'8px 12px', borderRadius:8, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.15)' }}>Show Triples</button>
-        <button onClick={()=>setShowMobility(true)} style={{ padding:'8px 12px', borderRadius:8, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.15)' }}>Network Migration</button>
-        <button onClick={()=>setShowPathFinding(true)} style={{ padding:'8px 12px', borderRadius:8, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.15)' }}>Path Finding v1</button>
-        <button onClick={()=>setShowPeopleNetwork(true)} style={{ padding:'8px 12px', borderRadius:8, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.15)' }}>People Network</button>
+      {/* Job title filter */}
+      <div style={{ position:'absolute', top:56, right:360, zIndex:20, display:'flex', gap:8, alignItems:'center' }}>
+        <input placeholder="Filter by job title" value={jobFilter||''} onChange={(e)=> setJobFilter(e.currentTarget.value || null)}
+          style={{ padding:'6px 8px', borderRadius:8, border:'1px solid rgba(255,255,255,0.2)', background:'rgba(255,255,255,0.06)', color:'#fff', width:220 }} />
+        {jobFilter && <button onClick={()=> setJobFilter(null)} style={{ padding:'6px 10px', borderRadius:8, background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.2)' }}>Clear</button>}
       </div>
+      <CommandBar onRun={run} />
+      <HUD focus={focus} nodes={nodeCount} fps={fps} selectedIndex={selectedIndex} concentric={concentric} onToggleConcentric={()=>setConcentric(c=>!c)} onSettings={()=>setShowSettings(true)} onBack={()=>{ if(cursor>0 && history[cursor]){ const cur=history[cursor]; const prev=history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); run(prev.id, { pushHistory:false, overrideMove:{ x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) } }} onForward={()=>{ if(cursor<history.length-1){ const next=history[cursor+1]; setCursor(cursor+1); if (next?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: next.turn||0 } })); run(next.id, { pushHistory:false, overrideMove:{ x: next?.move?.x||0, y: next?.move?.y||0 } }) } }} canBack={cursor>0} canForward={cursor<history.length-1} />
+      {/* demo buttons removed */}
       {err && (
         <div style={{ position:'absolute', top:52, left:12, right:12, padding:'10px 12px', background:'rgba(200,40,60,0.2)', border:'1px solid rgba(255,80,100,0.35)', color:'#ffbfc9', borderRadius:10, zIndex:11 }}>
           {err}
@@ -492,47 +570,7 @@ export default function App(){
       {showSettings && (
         <Settings apiBase={apiBase} bearer={bearer} onSave={({apiBase,bearer})=>{ setApiBase(apiBase); setBearer(bearer); setApiConfig(apiBase,bearer); setShowSettings(false); }} onClose={()=>setShowSettings(false)} />
       )}
-      {showTriples && (
-        <TriplesModal open={showTriples} onClose={()=>setShowTriples(false)} triples={demoTriples} />
-      )}
-      {showMobility && (
-        <div style={{ position:'absolute', inset:0, background:'rgba(2,6,23,0.8)', display:'grid', placeItems:'center', zIndex:40 }}>
-          <div style={{ width:'98vw', height:'96vh', maxWidth:'98vw', maxHeight:'96vh', borderRadius:20, background:'#0b0c10', border:'1px solid rgba(255,255,255,0.08)', boxShadow:'0 28px 120px rgba(0,0,0,0.6)', overflow:'auto' }}>
-            <div style={{ position:'absolute', top:16, right:16, zIndex:10 }}>
-              <button onClick={()=>setShowMobility(false)} style={{ padding:'8px 12px', borderRadius:8, background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.2)', fontSize:14 }}>Close</button>
-            </div>
-            <MobilitySankeyDemo />
-      </div>
-      {/* Optional: Job filter drawer (re-add button if you want always visible) */}
-      {/*
-      <JobFilterDrawer open={jobDrawer} onClose={()=>setJobDrawer(false)} titles={allJobTitles} selected={jobFilter} mode={'include'} onModeChange={()=>{}} onChange={(next)=>{ setJobFilter(next); try{ const ids=lastCompareIdsRef.current; if (ids && cacheTilesRef.current.a && cacheTilesRef.current.b){ const nextTile = buildCompareTile(cacheTilesRef.current.a as any, cacheTilesRef.current.b as any, { highlight: selectedRegion||undefined as any }); sceneRef.current?.setForeground(nextTile as any) } } catch{} }} />
-      */}
-        </div>
-      )}
-      {showPathFinding && (
-        <div style={{ position:'absolute', inset:0, background:'rgba(2,6,23,0.8)', display:'grid', placeItems:'center', zIndex:40 }}>
-          <div style={{ width:'98vw', height:'98vh', maxWidth:'98vw', maxHeight:'98vh', borderRadius:20, background:'#0b0c10', border:'1px solid rgba(255,255,255,0.08)', boxShadow:'0 28px 120px rgba(0,0,0,0.6)', overflow:'hidden', padding:16 }}>
-            <div style={{ position:'absolute', top:16, right:16, zIndex:10 }}>
-              <button onClick={()=>setShowPathFinding(false)} style={{ padding:'8px 12px', borderRadius:8, background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.2)', fontSize:14 }}>Close</button>
-            </div>
-            <div style={{ background:'#fff', color:'#0b122a', borderRadius:16, overflow:'hidden' }}>
-              <PathFindingDemo width={1100} height={demoHeight} />
-            </div>
-          </div>
-        </div>
-      )}
-      {showPeopleNetwork && (
-        <div style={{ position:'absolute', inset:0, background:'rgba(2,6,23,0.8)', display:'grid', placeItems:'center', zIndex:40 }}>
-          <div style={{ width:'98vw', height:'96vh', maxWidth:'98vw', maxHeight:'96vh', borderRadius:20, background:'#0b0c10', border:'1px solid rgba(255,255,255,0.08)', boxShadow:'0 28px 120px rgba(0,0,0,0.6)', overflow:'hidden' }}>
-            <div style={{ position:'absolute', top:16, right:16, zIndex:10 }}>
-              <button onClick={()=>setShowPeopleNetwork(false)} style={{ padding:'8px 12px', borderRadius:8, background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.2)', fontSize:14 }}>Close</button>
-            </div>
-            <div style={{ position:'absolute', inset:0 }}>
-              <PeopleNetwork />
-            </div>
-          </div>
-        </div>
-      )}
+      {/* demo modals removed */}
     </div>
   );
 }

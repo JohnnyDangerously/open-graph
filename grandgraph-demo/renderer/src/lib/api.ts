@@ -1,6 +1,12 @@
 let BASE = (localStorage.getItem('API_BASE_URL') || 'http://34.236.80.1:8123').replace(/\/+$/,'')
 export const setApiBase = (u:string) => { BASE = u.replace(/\/+$/,''); try{ localStorage.setItem('API_BASE_URL', BASE) }catch{} }
 export const getApiBase = () => BASE
+let BEARER = (localStorage.getItem('API_BEARER') || '')
+export const setApiConfig = (base?: string, bearer?: string) => {
+  if (typeof base === 'string' && base.length) setApiBase(base)
+  if (typeof bearer === 'string') { BEARER = bearer || ''; try { localStorage.setItem('API_BEARER', BEARER) } catch {} }
+}
+const authHeaders = () => (BEARER ? { Authorization: `Bearer ${BEARER}` } : {})
 
 async function asJSON(r: Response){
   const ct = r.headers.get('content-type') || ''
@@ -9,7 +15,7 @@ async function asJSON(r: Response){
   return JSON.parse(txt)
 }
 
-export async function healthz(){ return asJSON(await fetch(`${BASE}/healthz`, { mode:'cors' })) }
+export async function healthz(){ return asJSON(await fetch(`${BASE}/healthz`, { mode:'cors', headers: { ...authHeaders() } })) }
 
 export async function resolvePerson(q: string){
   const base = getApiBase()
@@ -28,7 +34,7 @@ export async function resolvePerson(q: string){
                     WHERE positionCaseInsensitive(linkedin, '/in/${slug.replace(/'/g,"''")}') > 0
                     ORDER BY connections DESC
                     LIMIT 1`
-      const r1 = await fetch(`${base}/?query=${encodeURIComponent(sql1)}&default_format=JSONEachRow`)
+      const r1 = await fetch(`${base}/?query=${encodeURIComponent(sql1)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
       const t1 = await r1.text(); const row1 = t1.trim().split('\n').filter(Boolean)[0]
       if (row1){ const j = JSON.parse(row1); return `person:${j.id}` }
       // Fallback: try exact normal forms
@@ -42,13 +48,13 @@ export async function resolvePerson(q: string){
       ]
       const inList = variants.map(v=>`'${v.replace(/'/g,"''")}'`).join(',')
       const sql2 = `SELECT toString(person_id_64) AS id FROM via_test.persons_large WHERE linkedin IN (${inList}) LIMIT 1`
-      const r2 = await fetch(`${base}/?query=${encodeURIComponent(sql2)}&default_format=JSONEachRow`)
+      const r2 = await fetch(`${base}/?query=${encodeURIComponent(sql2)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
       const t2 = await r2.text(); const row2 = t2.trim().split('\n').filter(Boolean)[0]
       if (row2){ const j = JSON.parse(row2); return `person:${j.id}` }
     } else {
       // last resort: try raw equality
       const url = `${base}/?query=${encodeURIComponent(`SELECT toString(person_id_64) AS id FROM via_test.persons_large WHERE linkedin = '${raw.replace(/'/g,"''")}' LIMIT 1`)}&default_format=JSONEachRow`
-      const r = await fetch(url)
+      const r = await fetch(url, { headers: { ...authHeaders() } })
       const t = await r.text()
       const row = t.trim().split('\n').filter(Boolean)[0]
       if (row){ const j = JSON.parse(row); return `person:${j.id}` }
@@ -74,7 +80,7 @@ export async function resolvePerson(q: string){
     )
     SELECT toString(id) AS id FROM agg`
   const url = `${base}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`
-  const r = await fetch(url)
+  const r = await fetch(url, { headers: { ...authHeaders() } })
   const t = await r.text()
   const row = t.trim().split('\n').filter(Boolean)[0]
   if (row){ const j = JSON.parse(row); return `person:${j.id}` }
@@ -86,7 +92,7 @@ export async function resolveCompany(q: string){
   // domain match
   if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(s)){
     const url = `${base}/?query=${encodeURIComponent(`SELECT toString(company_id_64) AS id FROM via_test.companies_large WHERE domain = '${s}' LIMIT 1`)}&default_format=JSONEachRow`
-    const r = await fetch(url); const t = await r.text(); const row = t.trim().split('\n').filter(Boolean)[0]
+    const r = await fetch(url, { headers: { ...authHeaders() } }); const t = await r.text(); const row = t.trim().split('\n').filter(Boolean)[0]
     if (row){ const j = JSON.parse(row); return `company:${j.id}` }
   }
   // name search
@@ -101,7 +107,7 @@ export async function fetchEgoJSON(id: string, limit=1500){
   const isCo = id.startsWith('company:')
   const key = id.replace(/^company:|^person:/,'')
   const param = isCo ? 'company_id' : 'person_id'
-  const r = await fetch(`${BASE}/graph/ego?${param}=${encodeURIComponent(key)}&limit=${limit}&format=json`)
+  const r = await fetch(`${BASE}/graph/ego?${param}=${encodeURIComponent(key)}&limit=${limit}&format=json`, { headers: { ...authHeaders() } })
   if (!r.ok) throw new Error(`ego json ${r.status}`)
   return asJSON(r)
 }
@@ -109,7 +115,7 @@ export async function fetchEgoFastJSON(id: string, limit=1500){
   const isCo = id.startsWith('company:')
   const key = id.replace(/^company:|^person:/,'')
   const param = isCo ? 'company_id' : 'person_id'
-  const r = await fetch(`${BASE}/graph/ego_fast?${param}=${encodeURIComponent(key)}&limit=${limit}&format=json`)
+  const r = await fetch(`${BASE}/graph/ego_fast?${param}=${encodeURIComponent(key)}&limit=${limit}&format=json`, { headers: { ...authHeaders() } })
   if (!r.ok) throw new Error(`ego_fast json ${r.status}`)
   return asJSON(r)
 }
@@ -329,25 +335,31 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
       ORDER BY overlap_days DESC
       LIMIT ${Math.min(limit, 1000)}
     )
-    SELECT toString(a.neighbor_id) AS id, a.overlap_days AS w, p.name AS name
+    SELECT
+      toString(a.neighbor_id) AS id,
+      a.overlap_days AS w,
+      anyLast(p.name) AS name,
+      argMax(s.title, ifNull(s.end_date, today())) AS title
     FROM agg a
-    INNER JOIN via_test.persons_large p ON p.person_id_64 = a.neighbor_id
+    LEFT JOIN via_test.persons_large p ON p.person_id_64 = a.neighbor_id
+    LEFT JOIN via_test.stints_large s ON toUInt64(s.${use64 ? 'person_id_64' : 'person_id'}) = a.neighbor_id
+    GROUP BY id, w
   `
   const executeNeighbors = async (personKey: string) => {
     let sql = buildOverlapSQL(personKey, true)
     console.log('fetchEgoClientJSON: Executing SQL:', sql)
     const url = `${BASE}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`
-    let res = await fetch(url)
+    let res = await fetch(url, { headers: { ...authHeaders() } })
     if (!res.ok) {
       // Try non-_64 variant
       sql = buildOverlapSQL(personKey, false)
       console.log('fetchEgoClientJSON: Retrying with person_id (non _64):', sql)
-      res = await fetch(`${BASE}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`)
+      res = await fetch(`${BASE}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
     }
     if (!res.ok) { const msg = await res.text().catch(()=>"" as any); throw new Error(`fetch failed ${res.status}: ${msg.slice(0,200)}`) }
     const text = await res.text()
     const lines = text.trim() ? text.trim().split('\n').filter(Boolean) : []
-    return lines.map(line => JSON.parse(line)) as Array<{id:number; w:number; name:string}>
+    return lines.map(line => JSON.parse(line)) as Array<{id:number; w:number; name:string; title?: string}>
   }
   
   let neighbors = await executeNeighbors(effectiveKey)
@@ -371,12 +383,12 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
     let sql2 = buildCoworkersSQL(effectiveKey, true)
     console.log('fetchEgoClientJSON: Fallback SQL (no time-overlap):', sql2)
     let url2 = `${BASE}/?query=${encodeURIComponent(sql2)}&default_format=JSONEachRow`
-    let res2 = await fetch(url2)
+    let res2 = await fetch(url2, { headers: { ...authHeaders() } })
     if (!res2.ok) {
       sql2 = buildCoworkersSQL(effectiveKey, false)
       console.log('fetchEgoClientJSON: Fallback retry with person_id:', sql2)
       url2 = `${BASE}/?query=${encodeURIComponent(sql2)}&default_format=JSONEachRow`
-      res2 = await fetch(url2)
+      res2 = await fetch(url2, { headers: { ...authHeaders() } })
     }
     if (res2.ok) {
       const text2 = await res2.text()
@@ -388,11 +400,22 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
 
   // Name-based surrogate fallback: find a person with similar name who has stints
   let centerName = 'Center'
+  let centerTitle: string | null = null
   try {
-    const centerSQL = `SELECT name FROM via_test.persons_large WHERE person_id_64 = toUInt64(${effectiveKey}) LIMIT 1`
-    const centerRes = await fetch(`${BASE}/?query=${encodeURIComponent(centerSQL)}&default_format=JSONEachRow`)
+    const centerSQL = `
+      SELECT anyLast(p.name) AS name, argMax(s.title, ifNull(s.end_date, today())) AS title
+      FROM via_test.persons_large p
+      LEFT JOIN via_test.stints_large s ON s.person_id_64 = toUInt64(${effectiveKey})
+      WHERE p.person_id_64 = toUInt64(${effectiveKey})
+      GROUP BY p.person_id_64
+      LIMIT 1`
+    const centerRes = await fetch(`${BASE}/?query=${encodeURIComponent(centerSQL)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
     const centerText = await centerRes.text()
-    centerName = centerText.trim() ? JSON.parse(centerText.trim().split('\n')[0]).name : 'Center'
+    if (centerText.trim()) {
+      const row = JSON.parse(centerText.trim().split('\n')[0])
+      centerName = row?.name || 'Center'
+      centerTitle = row?.title || null
+    }
   } catch {}
 
   if (neighbors.length === 0 && !triedNameFallback && centerName && centerName.length >= 3) {
@@ -408,7 +431,7 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
         LIMIT 1
       )
       SELECT toString(id) AS id FROM cand`
-    const altRes = await fetch(`${BASE}/?query=${encodeURIComponent(altSql)}&default_format=JSONEachRow`)
+    const altRes = await fetch(`${BASE}/?query=${encodeURIComponent(altSql)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
     const altTxt = await altRes.text(); const altRow = altTxt.trim().split('\n').filter(Boolean)[0]
     if (altRow) {
       const alt = JSON.parse(altRow).id as string
@@ -432,7 +455,7 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
             LIMIT ${Math.min(limit, 600)}
           `
           const url2b = `${BASE}/?query=${encodeURIComponent(sql2b)}&default_format=JSONEachRow`
-          const r2b = await fetch(url2b)
+          const r2b = await fetch(url2b, { headers: { ...authHeaders() } })
           if (r2b.ok) {
             const t2b = await r2b.text()
             const l2b = t2b.trim() ? t2b.trim().split('\n').filter(Boolean) : []
@@ -482,8 +505,8 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
 
   const tile = {
     meta: {
-      nodes: [{ id: String(effectiveKey), name: centerName, full_name: centerName, group: 0, flags: 0 }, 
-        ...neighbors.slice(0, count-1).map((n:any) => ({ id: String(n.id), name: n.name, full_name: n.name, group: 0, flags: 0 }))
+      nodes: [{ id: String(effectiveKey), name: centerName, full_name: centerName, title: centerTitle, group: 0, flags: 0 }, 
+        ...neighbors.slice(0, count-1).map((n:any) => ({ id: String(n.id), name: n.name, full_name: n.name, title: (n.title||null), group: 0, flags: 0 }))
       ]
     },
     coords: {
@@ -510,14 +533,16 @@ export async function fetchCompanyEgoJSON(id: string, limit = 1500){
       ORDER BY c DESC
       LIMIT ${Math.min(limit, 1000)}
     )
-    SELECT e.person_id AS id, e.c AS w, p.name AS name
+    SELECT e.person_id AS id, e.c AS w, anyLast(p.name) AS name, argMax(s.title, ifNull(s.end_date, today())) AS title
     FROM emp e
-    JOIN via_test.persons_large p ON p.person_id_64 = e.person_id
+    LEFT JOIN via_test.persons_large p ON p.person_id_64 = e.person_id
+    LEFT JOIN via_test.stints_large s ON s.person_id_64 = e.person_id
+    GROUP BY id, w
   `
   const url = `${BASE}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`
-  const res = await fetch(url); if (!res.ok) throw new Error('company ego fetch failed')
+  const res = await fetch(url, { headers: { ...authHeaders() } }); if (!res.ok) throw new Error('company ego fetch failed')
   const text = await res.text()
-  const rows = text.trim() ? text.trim().split('\n').map(l=>JSON.parse(l)) : [] as Array<{id:number; w:number; name:string}>
+  const rows = text.trim() ? text.trim().split('\n').map(l=>JSON.parse(l)) : [] as Array<{id:number; w:number; name:string, title?: string}>
   const count = 1 + rows.length
   const nodes: Array<[number,number]> = new Array(count)
   nodes[0] = [0,0]
@@ -534,8 +559,9 @@ export async function fetchCompanyEgoJSON(id: string, limit = 1500){
       nodes[idx] = [Math.cos(a)*R + (Math.random()*2-1)*30, Math.sin(a)*R + (Math.random()*2-1)*30]
     }
   }
-  return {
-    meta: { nodes: new Array(count).fill(0).map((_, i) => ({ id: i===0? String(key): String(rows[i-1]?.id||i), full_name: i===0? 'Employees' : String(rows[i-1]?.name||''), group: 0, flags: 0 })) },
-    coords: { nodes, edges }
-  }
+  const metaNodes = new Array(count).fill(0).map((_, i) => (
+    i===0 ? { id: String(key), full_name: 'Employees', name: 'Employees', title: null, group: 0, flags: 0 }
+          : { id: String(rows[i-1]?.id||i), full_name: String(rows[i-1]?.name||''), name: String(rows[i-1]?.name||''), title: rows[i-1]?.title || null, group: 0, flags: 0 }
+  ))
+  return { meta: { nodes: metaNodes }, coords: { nodes, edges } }
 }

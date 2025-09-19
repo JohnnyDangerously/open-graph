@@ -31,7 +31,21 @@ export async function resolveSmart(q: string): Promise<string | null> {
 }
 
 export async function loadTileSmart(key: string) {
-  // Prefer binary path (stable), then JSON as secondary
+  // Company: go straight to JSON builder. Person: prefer binary first.
+  if (key.startsWith('company:')) {
+    const j = await fetchCompanyEgoJSON(key, 1500)
+    const tile = parseJsonTile(j)
+    if (tile && (j.meta?.nodes?.length)) {
+      const labels = new Array(tile.count)
+      for (let i=0;i<tile.count;i++){
+        const n = j.meta.nodes[i] || {}
+        labels[i] = (n.full_name || n.name || n.id || `#${i}`)
+      }
+      ;(tile as any).labels = labels
+    }
+    return { tile }
+  }
+  // Person flow
   try {
     console.log('loadTileSmart: trying fetchEgoBinary for key:', key)
     const b = await fetchEgoBinary(key, 1500) as any
@@ -46,7 +60,7 @@ export async function loadTileSmart(key: string) {
     console.warn('loadTileSmart: binary path failed, trying JSON:', e)
   }
   try {
-    const j = key.startsWith('company:') ? await fetchCompanyEgoJSON(key, 1500) : await fetchEgoClientJSON(key, 1500)
+    const j = await fetchEgoClientJSON(key, 1500)
     const tile = parseJsonTile(j)
     if (tile && (j.meta?.nodes?.length)) {
       const labels = new Array(tile.count)

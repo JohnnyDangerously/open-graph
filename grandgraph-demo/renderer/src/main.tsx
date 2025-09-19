@@ -48,6 +48,8 @@ function Root(){
   const [edgeColor, setEdgeColor] = useState<string>(()=>{ try { return localStorage.getItem('EDGE_COLOR') || '#4da3ff' } catch { return '#4da3ff' } })
   const [sideHole, setSideHole] = useState<boolean>(()=>{ try { return localStorage.getItem('SIDE_HOLE') === '1' } catch { return false } })
   const [sectorDensity, setSectorDensity] = useState<boolean>(()=>{ try { return localStorage.getItem('SECTOR_DENSITY') === '1' } catch { return false } })
+  const [bgPaused, setBgPaused] = useState<boolean>(true)
+  const [bgRotSpeed, setBgRotSpeed] = useState<number>(0.0)
   React.useEffect(()=>{ try{ localStorage.setItem('NODE_SCALE', String(nodeScale)) }catch{} }, [nodeScale])
   React.useEffect(()=>{ try{ localStorage.setItem('EDGE_FRACTION', String(edgeFraction)) }catch{} }, [edgeFraction])
   React.useEffect(()=>{ try{ localStorage.setItem('EDGE_ALPHA', String(edgeAlpha)) }catch{} }, [edgeAlpha])
@@ -97,10 +99,15 @@ function Root(){
   // one-shot gate to avoid double login in dev/StrictMode or remounts
   const already = typeof window !== 'undefined' && sessionStorage.getItem('logged_in') === '1'
   const showLogin = !connected && !already
+  React.useEffect(()=>{
+    // Pause when not on login; optionally allow tiny rotation
+    setBgPaused(!showLogin)
+    setBgRotSpeed(showLogin ? 0.0 : 0.0) // default to fully stopped; adjust to 0.005 for tiny motion
+  }, [showLogin])
   return (
     <div style={{ position:'fixed', inset:0 }}>
       {/* Single persistent scene: acts as login when showLogin, becomes background after connect */}
-      <LoginScene asBackground={!showLogin} dense={dense} palette={palette} brightness={brightness} showEdges={showEdges} edgeMultiplier={edgeMultiplier} fourCores={fourCores} nodeScale={nodeScale} edgeFraction={edgeFraction} edgeAlpha={edgeAlpha} sizeScale={sizeScale} rotSpeed={rotSpeed} edgeColor={edgeColor} sideHole={sideHole} sectorDensity={sectorDensity} syncKey="bg" onDone={()=>{ try{ sessionStorage.setItem('logged_in','1') }catch{}; setConnected(true); setBlend(true); setTimeout(()=>setBlend(false), 260); }} onConnect={()=>{ try{ sessionStorage.setItem('logged_in','1') }catch{}; setConnected(true); setBlend(true); setTimeout(()=>setBlend(false), 260); }} />
+      <LoginScene asBackground={!showLogin} dense={dense} palette={palette} brightness={brightness} showEdges={showEdges} edgeMultiplier={edgeMultiplier} fourCores={fourCores} nodeScale={nodeScale} edgeFraction={edgeFraction} edgeAlpha={edgeAlpha} sizeScale={sizeScale} rotSpeed={rotSpeed} edgeColor={edgeColor} sideHole={sideHole} sectorDensity={sectorDensity} bgPaused={bgPaused} bgRotSpeed={bgRotSpeed} syncKey="bg" onDone={()=>{ try{ sessionStorage.setItem('logged_in','1') }catch{}; setConnected(true); setBlend(true); setTimeout(()=>setBlend(false), 260); }} onConnect={()=>{ try{ sessionStorage.setItem('logged_in','1') }catch{}; setConnected(true); setBlend(true); setTimeout(()=>setBlend(false), 260); }} />
       {/* App on top */}
       <div style={{ position:'absolute', inset:0, opacity: (!showLogin || connected) ? 1 : (blend ? 1 : 0), transition:'opacity 260ms linear', pointerEvents: (!showLogin || connected) ? 'auto' : 'none' }}>
         <App />

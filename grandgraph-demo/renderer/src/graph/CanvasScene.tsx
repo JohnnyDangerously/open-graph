@@ -7,8 +7,9 @@ type Props = {
   concentric?: boolean, 
   onPick?: (index: number) => void, 
   onClear?: () => void, 
-  filters?: { email: boolean, work: boolean, social: boolean, phone: boolean },
-  onRegionClick?: (region: 'left'|'right'|'overlap') => void
+  onRegionClick?: (region: 'left'|'right'|'overlap') => void,
+  selectedIndex?: number | null,
+  visibleMask?: boolean[] | null
 }
 
 type Node = {
@@ -38,11 +39,17 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
   useEffect(()=>{ tyRef.current = ty }, [ty])
   useEffect(()=>{ scaleRef.current = scale }, [scale])
   const nodesRef = useRef<Node[]>([])
+  const visibleMaskRef = useRef<boolean[] | null>(null)
   const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 })
   const draggingNodeRef = useRef<Node | null>(null)
   const dragLastRef = useRef<{ x: number, y: number } | null>(null)
   const isPanningRef = useRef(false)
   const animFrameRef = useRef<number>(0)
+  // Keep latest tile and a short trail of previous graphs (max 2)
+  const tileRef = useRef<ParsedTile | null>(null)
+  useEffect(()=>{ tileRef.current = tile }, [tile])
+  const trailRef = useRef<Array<{ nodes: Float32Array, size: Float32Array, alpha: Float32Array, edges?: Uint16Array, center:{x:number,y:number}, color:string }>>([])
+  const trailColors = ['#5ec8ff', '#ff8ac2'] // newest → oldest
   
   // Convert tile data to nodes/edges
   const { nodes, edges } = React.useMemo(() => {
@@ -54,7 +61,6 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       sizeLength: tile.size?.length,
       alphaLength: tile.alpha?.length,
       edgesLength: tile.edges?.length,
-      labelsLength: props.labels?.length,
       firstNode: tile.nodes?.slice(0,4),
       firstEdge: tile.edges?.slice(0,4)
     })
@@ -89,12 +95,13 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
     
     console.log(`CanvasScene: Created ${nodes.length} nodes, ${edges.length} edges`)
     return { nodes, edges }
-  }, [tile, props.labels]) // Added props.labels to dependencies
+  }, [tile])
 
   useEffect(()=>{ nodesRef.current = nodes }, [nodes])
+  useEffect(()=>{ visibleMaskRef.current = (Array.isArray(props.visibleMask) ? props.visibleMask : null) }, [props.visibleMask])
 
   useImperativeHandle(ref, () => ({
-    setForeground: (fg) => {
+    setForeground: (fg, opts?: { noTrailSnapshot?: boolean }) => {
       console.log('CanvasScene setForeground: Received fg:', {
         count: fg?.count,
         nodesLength: fg?.nodes?.length,
@@ -104,6 +111,26 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
         firstNodes: fg?.nodes?.slice(0,8),
         firstSizes: fg?.size?.slice(0,4)
       })
+      // Snapshot current tile into the trail (max 2) unless suppressed
+      if (!opts?.noTrailSnapshot) {
+        try {
+          const prev = tileRef.current as any
+          if (prev && prev.nodes && prev.size && prev.alpha) {
+            const snap = {
+              nodes: new Float32Array(prev.nodes),
+              size: new Float32Array(prev.size),
+              alpha: new Float32Array(prev.alpha),
+              edges: prev.edges ? new Uint16Array(prev.edges) : undefined,
+              center: (prev.focusWorld && typeof prev.focusWorld.x === 'number') ? { x: prev.focusWorld.x, y: prev.focusWorld.y } : { x: prev.nodes[0]||0, y: prev.nodes[1]||0 },
+              color: trailColors[0]
+            }
+            const nextTrail = [snap, ...trailRef.current].slice(0, 2)
+            // Rotate colors so newest uses first color
+            for (let i=0;i<nextTrail.length;i++) nextTrail[i].color = trailColors[i] || '#88a'
+            trailRef.current = nextTrail
+          }
+        } catch (e) { console.warn('Trail snapshot failed', e) }
+      }
       setTile(fg)
       try { labelsRef.current = (fg as any).labels || null } catch {}
       // Reset view and auto-fit the new data
@@ -117,7 +144,7 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
           // Wait two more frames so fitToContent state is applied
           requestAnimationFrame(()=>{
             requestAnimationFrame(()=>{
-              const spawn = (fg as any).spawn
+          const spawn = (fg as any).spawn
               const focusWorld = (fg as any).focusWorld
               // Fallback to center node from incoming tile if no explicit focus target
               const fallbackX = Array.isArray((fg as any).nodes) ? (fg as any).nodes[0] : undefined
@@ -125,17 +152,69 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
               const wantFocus = (focusWorld && typeof focusWorld.x === 'number' && typeof focusWorld.y === 'number')
                 ? focusWorld
                 : (typeof fallbackX === 'number' && typeof fallbackY === 'number' ? { x: fallbackX, y: fallbackY } : null)
+              const zoom2x = Math.min(3.5, (scaleRef.current || 1) * 2.0)
               if (focusWorld && typeof focusWorld.x === 'number' && typeof focusWorld.y === 'number'){
-                centerOnWorld(focusWorld.x, focusWorld.y, { animate: true, ms: 500 })
+                centerOnWorld(focusWorld.x, focusWorld.y, { animate: true, ms: 500, zoom: zoom2x })
               } else if (spawn && typeof spawn.x === 'number' && typeof spawn.y === 'number'){
-                centerOnWorld(spawn.x, spawn.y, { animate: true, ms: 420 })
+                centerOnWorld(spawn.x, spawn.y, { animate: true, ms: 420, zoom: zoom2x })
               } else if (wantFocus) {
-                centerOnWorld(wantFocus.x, wantFocus.y, { animate: true, ms: 480 })
+                centerOnWorld(wantFocus.x, wantFocus.y, { animate: true, ms: 480, zoom: zoom2x })
               }
             })
           })
         } catch {}
       }, 200)
+    },
+    promoteTrailPrevious: (): boolean => {
+      try {
+        const prevCurrent: any = tileRef.current
+        const trail = trailRef.current
+        if (!trail || trail.length === 0) return false
+        const nextCurrent = trail[0]
+        const rest = trail.slice(1)
+        // Build new trail by placing previous current as newest dimmed, then remaining
+        if (prevCurrent && prevCurrent.nodes && prevCurrent.size && prevCurrent.alpha) {
+          const snap = {
+            nodes: new Float32Array(prevCurrent.nodes),
+            size: new Float32Array(prevCurrent.size),
+            alpha: new Float32Array(prevCurrent.alpha),
+            edges: prevCurrent.edges ? new Uint16Array(prevCurrent.edges) : undefined,
+            center: (prevCurrent.focusWorld && typeof prevCurrent.focusWorld.x === 'number') ? { x: prevCurrent.focusWorld.x, y: prevCurrent.focusWorld.y } : { x: prevCurrent.nodes[0]||0, y: prevCurrent.nodes[1]||0 },
+            color: trailColors[0]
+          }
+          const nextTrail = [snap, ...rest].slice(0, 2)
+          for (let i=0;i<nextTrail.length;i++) nextTrail[i].color = trailColors[i] || '#88a'
+          trailRef.current = nextTrail
+        } else {
+          trailRef.current = rest
+        }
+        // Promote nextCurrent to foreground without re-snapshotting
+        const fg: any = {
+          count: nextCurrent.nodes.length/2,
+          nodes: new Float32Array(nextCurrent.nodes),
+          size: new Float32Array(nextCurrent.size),
+          alpha: new Float32Array(nextCurrent.alpha),
+          edges: nextCurrent.edges ? new Uint16Array(nextCurrent.edges) : undefined,
+        }
+        ;(fg as any).focusWorld = { x: nextCurrent.center.x, y: nextCurrent.center.y }
+        ;(fg as any).labels = null
+        ;(fg as any).spawn = { x: 0, y: 0 }
+        // Apply foreground with no trail snapshot
+        try { labelsRef.current = (fg as any).labels || null } catch {}
+        setTile(fg)
+        setTx(0)
+        setTy(0)
+        setScale(1)
+        setTimeout(()=>{
+          fitToContent()
+          requestAnimationFrame(()=>{
+            requestAnimationFrame(()=>{
+              centerOnWorld(nextCurrent.center.x, nextCurrent.center.y, { animate:true, ms: 460 })
+            })
+          })
+        }, 120)
+        return true
+      } catch (e) { console.warn('promoteTrailPrevious failed', e); return false }
     },
     clear: () => {
       setTile(null)
@@ -204,7 +283,7 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
     const startSx = wx * startScale + startTx
     const startSy = wy * startScale + startTy
     const endScale = typeof opts?.zoom === 'number' ? opts.zoom : startScale
-    const duration = Math.max(120, Math.min(1200, opts?.ms || 420))
+    const duration = Math.max(200, Math.min(1200, opts?.ms || 700))
  
     if (!opts?.animate) {
       const toTx = (w/2) - wx * endScale
@@ -342,6 +421,8 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
   function pickNode(sx: number, sy: number): Node | null {
     const world = screenToWorld(sx, sy)
     for (let i = nodes.length - 1; i >= 0; i--) {
+      const vm = visibleMaskRef.current
+      if (vm && vm.length === nodes.length && !vm[i]) continue
       const node = nodes[i]
       const dx = world.x - node.x
       const dy = world.y - node.y
@@ -479,9 +560,64 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
     const ctx = canvas.getContext('2d')
     if (!ctx) return
     
+    const now = performance.now()
     ctx.save()
     ctx.clearRect(0, 0, canvas.width, canvas.height)
     
+    // Draw trail graphs (older → darker). Render edges then nodes, dimmed.
+    try {
+      const trail = trailRef.current
+      const currCenter = (()=>{
+        const t:any = tileRef.current
+        if (t?.focusWorld && typeof t.focusWorld.x==='number') return { x:t.focusWorld.x, y:t.focusWorld.y }
+        if (t?.nodes && t.nodes.length>=2) return { x:t.nodes[0], y:t.nodes[1] }
+        return null
+      })()
+      for (let ti = trail.length-1; ti >= 0; ti--) {
+        const t = trail[ti]
+        const color = t.color
+        // edges
+        if (t.edges && t.edges.length > 0) {
+          ctx.save()
+          ctx.strokeStyle = `${color}55`
+          ctx.lineWidth = 1.5
+          const step = scale < 0.8 && t.edges.length/2 > 1500 ? Math.ceil((t.edges.length/2)/1500)*2 : 2
+          for (let i=0; i < t.edges.length; i += step) {
+            const a = t.edges[i]|0, b = t.edges[i+1]|0
+            const ax = t.nodes[a*2], ay = t.nodes[a*2+1]
+            const bx = t.nodes[b*2], by = t.nodes[b*2+1]
+            const A = worldToScreen(ax, ay), B = worldToScreen(bx, by)
+            ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke()
+          }
+          ctx.restore()
+        }
+        // nodes
+        ctx.save()
+        ctx.globalAlpha = 0.55 - ti*0.15
+        for (let i=0;i<t.nodes.length/2;i++){
+          const x = t.nodes[i*2], y = t.nodes[i*2+1]
+          const screen = worldToScreen(x, y)
+          const r = Math.max(6, (t.size[i]||3) * scale * 0.7)
+          ctx.beginPath(); ctx.arc(screen.x, screen.y, r, 0, Math.PI*2)
+          ctx.fillStyle = `${color}99`
+          ctx.fill()
+        }
+        ctx.restore()
+        // connector to next newer graph (or current if newest trail)
+        const nextCenter = ti === 0 ? currCenter : trail[ti-1]?.center
+        if (nextCenter) {
+          const A = worldToScreen(t.center.x, t.center.y)
+          const B = worldToScreen(nextCenter.x, nextCenter.y)
+          ctx.save()
+          ctx.strokeStyle = color
+          ctx.lineWidth = 3
+          ctx.setLineDash([8,6])
+          ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke()
+          ctx.restore()
+        }
+      }
+    } catch {}
+
     // Compare-mode overlays: draw filled semi-circles and distinct overlap lens
     try {
       const ov: any = (tile as any)?.compareOverlay
@@ -566,12 +702,25 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       }
     } catch {}
     
-    // Foreground edges disabled per request; background edges remain in LoginScene
-    // (Do not draw any graph edges here)
+    // Draw foreground edges first so nodes render on top
+    if (edges && edges.length > 0) {
+      // Optionally thin out when zoomed far out for performance/clarity
+      const step = scale < 0.9 && edges.length > 2000 ? Math.ceil(edges.length / 2000) : 1
+      for (let i = 0; i < edges.length; i += step) {
+        const e = edges[i]
+        const vm = visibleMaskRef.current
+        if (vm && vm.length === nodes.length) {
+          if (!vm[e.source] || !vm[e.target]) continue
+        }
+        drawEdge(ctx, e)
+      }
+    }
     
     // Draw nodes - People Network style
     let visibleNodes = 0
     for (let i = 0; i < nodes.length; i++) {
+      const vm = visibleMaskRef.current
+      if (vm && vm.length === nodes.length && !vm[i]) continue
       const node = nodes[i]
       const screen = worldToScreen(node.x, node.y)
       let radius = Math.max(12, node.size * scale * 0.8) // People Network sizing
@@ -596,6 +745,13 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
         }
       } catch {}
 
+      const isSelected = typeof props.selectedIndex === 'number' && props.selectedIndex === i
+      if (isSelected) {
+        // Enhance the selected node styling
+        glow = 'rgba(255,255,255,0.5)'
+        border = 'rgba(255,255,255,1.0)'
+      }
+      
       // Outer glow (subtle)
       ctx.beginPath()
       ctx.arc(screen.x, screen.y, radius + 2, 0, Math.PI * 2)
@@ -612,6 +768,22 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       ctx.strokeStyle = border
       ctx.lineWidth = 1.5
       ctx.stroke()
+      
+      // Selection highlight: pulsing halo + ring
+      if (isSelected) {
+        const pulse = (Math.sin(now / 180) + 1) * 0.5 // 0..1
+        const haloR = radius + 8 + pulse * 6
+        ctx.beginPath()
+        ctx.arc(screen.x, screen.y, haloR, 0, Math.PI * 2)
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)'
+        ctx.lineWidth = 2
+        ctx.stroke()
+        ctx.beginPath()
+        ctx.arc(screen.x, screen.y, haloR + 3, 0, Math.PI * 2)
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)'
+        ctx.lineWidth = 2
+        ctx.stroke()
+      }
       
       ctx.restore()
 
@@ -676,13 +848,16 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       const mx = e.clientX - rect.left
       const my = e.clientY - rect.top
       const before = screenToWorld(mx, my)
-      const delta = -e.deltaY * 0.001
+      // Faster zoom: increase sensitivity multiplier
+      const speed = 0.003; // was 0.001
+      const delta = -e.deltaY * speed
       const newScale = Math.max(0.2, Math.min(3.5, scale * (1 + delta)))
       setScale(newScale)
       const sx = before.x * newScale + tx
       const sy = before.y * newScale + ty
       setTx(tx + (mx - sx))
       setTy(ty + (my - sy))
+      try { window.dispatchEvent(new CustomEvent('graph_pan', { detail: { tx: txRef.current, ty: tyRef.current }})) } catch {}
     }
 
     const onDown = (e: PointerEvent) => {
@@ -751,6 +926,7 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       } else if (isPanningRef.current) {
         setTx(prev => prev + dx)
         setTy(prev => prev + dy)
+        try { window.dispatchEvent(new CustomEvent('graph_pan', { detail: { tx: txRef.current + dx, ty: tyRef.current + dy }})) } catch {}
       }
     }
 
@@ -796,8 +972,8 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
 
   return (
     <div style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
-      {/* Subtle dark overlay to reduce background noise */}
-      <div style={{ position:'absolute', inset:0, background:'rgba(5,7,12,0.55)', zIndex:0, pointerEvents:'none' }} />
+      {/* Subtle dark overlay to reduce background noise (very low translucency) */}
+      <div style={{ position:'absolute', inset:0, background:'rgba(5,7,12,0.65)', zIndex:0, pointerEvents:'none' }} />
       {/* Graph canvas layer */}
       <canvas 
         ref={canvasRef} 
