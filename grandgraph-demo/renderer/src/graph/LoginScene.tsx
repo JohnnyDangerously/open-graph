@@ -608,11 +608,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
           const c = Math.cos(tiltRef.current), s = Math.sin(tiltRef.current);
           return [1, 0, 0, 0, c, -s, 0, s, c];
         },
-<<<<<<< HEAD
-        u_rotSpeed: () => (asBackground ? (bgRotSpeed || 0.0) : rotSpeedRef.current),
-=======
         u_rotSpeed: () => (asBackground ? Math.max(0.0, Math.min(0.05, bgRotSpeed || 0.0)) : rotSpeedRef.current),
->>>>>>> a1efe64 (chore: commit via assistant on 2025-09-19T05:53:29Z)
         u_centerCut: () => 0.45,
         u_edgeAlpha: () => (asBackground ? edgeAlphaRef.current * 0.5 : edgeAlphaRef.current),
         u_edgeColor: () => edgeColorRef.current,
