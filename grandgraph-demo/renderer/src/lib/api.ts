@@ -1,4 +1,12 @@
+// TEMP: agent sanity check
 let BASE = (localStorage.getItem('API_BASE_URL') || 'http://34.236.80.1:8123').replace(/\/+$/,'')
+
+// Feature flag for local fake database
+const LOCAL_FAKE_DB = true
+
+export async function __probe_echo(input: string){
+  return { ok: true, input, ts: new Date().toISOString() }
+}
 export const setApiBase = (u:string) => { BASE = u.replace(/\/+$/,''); try{ localStorage.setItem('API_BASE_URL', BASE) }catch{} }
 export const getApiBase = () => BASE
 let BEARER = (localStorage.getItem('API_BEARER') || '')
@@ -87,8 +95,18 @@ export async function resolvePerson(q: string){
   return null as any
 }
 export async function resolveCompany(q: string){
-  const base = getApiBase()
   const s = q.trim()
+  
+  // Use fake data if feature flag is enabled
+  if (LOCAL_FAKE_DB) {
+    if (s.toLowerCase() === 'testco') {
+      return { id: 'cmp_TEST', name: 'TestCo' }
+    }
+    return null
+  }
+  
+  // Real ClickHouse implementation
+  const base = getApiBase()
   // domain match
   if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(s)){
     const url = `${base}/?query=${encodeURIComponent(`SELECT toString(company_id_64) AS id FROM via_test.companies_large WHERE domain = '${s}' LIMIT 1`)}&default_format=JSONEachRow`
@@ -564,4 +582,24 @@ export async function fetchCompanyEgoJSON(id: string, limit = 1500){
           : { id: String(rows[i-1]?.id||i), full_name: String(rows[i-1]?.name||''), name: String(rows[i-1]?.name||''), title: rows[i-1]?.title || null, group: 0, flags: 0 }
   ))
   return { meta: { nodes: metaNodes }, coords: { nodes, edges } }
+}
+
+// Company contacts function
+export async function companyContacts(companyName: string) {
+  const s = companyName.trim()
+  
+  // Use fake data if feature flag is enabled
+  if (LOCAL_FAKE_DB) {
+    if (s.toLowerCase() === 'testco') {
+      return [
+        { id: 'person_1', name: 'John Smith', title: 'Software Engineer', company: 'TestCo' },
+        { id: 'person_2', name: 'Jane Doe', title: 'Product Manager', company: 'TestCo' }
+      ]
+    }
+    return []
+  }
+  
+  // Real ClickHouse implementation would go here
+  // For now, return empty array
+  return []
 }
