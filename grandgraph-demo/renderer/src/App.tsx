@@ -256,6 +256,37 @@ export default function App(){
     return { first, second, firstIds, secondIds }
   }
 
+  // Dual-threshold degrees: first-degree via >= minFirst months edges from center;
+  // second-degree via neighbors-of-first where the second hop uses >= minSecond months.
+  function degreesForDual(tile: ParsedTile, minFirstMonths: number, minSecondMonths: number){
+    const count = tile.count|0
+    const edges = tile.edges || new Uint16Array(0)
+    const weights: (Float32Array | Uint8Array | undefined) = (tile as any).edgeWeights
+    const mAll = edges.length >>> 1
+    const neighbors24: number[][] = Array.from({ length: count }, () => [])
+    const neighbors36: number[][] = Array.from({ length: count }, () => [])
+    for (let i=0;i<mAll;i++){
+      const a = edges[i*2]|0, b = edges[i*2+1]|0
+      if (a>=count || b>=count) continue
+      let w = 0
+      if (weights && (weights as any).length === mAll){
+        w = Number((weights as any)[i])
+      }
+      if (w >= minFirstMonths){ neighbors24[a].push(b); neighbors24[b].push(a) }
+      if (w >= minSecondMonths){ neighbors36[a].push(b); neighbors36[b].push(a) }
+    }
+    const first = Array.from(new Set(neighbors24[0]||[])).filter(i=>i>0)
+    const firstIds = new Set<string>(first.map(i=>nodeIdFor(tile as any, i)))
+    const second: number[] = []
+    const seen = new Set<number>([0, ...first])
+    for (const f of first){
+      const nbrs = neighbors36[f] || []
+      for (const n of nbrs){ if (!seen.has(n)){ seen.add(n); if (n>0) second.push(n) } }
+    }
+    const secondIds = new Set<string>(second.map(i=>nodeIdFor(tile as any, i)))
+    return { first, second, firstIds, secondIds }
+  }
+
   // Blue-noise best-candidate sampling inside a half-annulus to avoid visible rings/lines
   function pointsInHalfAnnulus(cx:number, cy:number, rInner:number, rOuter:number, n:number){
     const pts: Array<{x:number,y:number}> = []
@@ -292,9 +323,9 @@ export default function App(){
   }
 
   function buildCompareTile(a: ParsedTile, b: ParsedTile, opts?: { highlight?: 'left'|'right'|'overlap' }){
-    // Compute degrees using work-only edges with 2+ years threshold when available
-    const degA = degreesFor(a, { workOnly:true, minYears:24 })
-    const degB = degreesFor(b, { workOnly:true, minYears:24 })
+    // Compute degrees with dual thresholds: 24m for first-degree, 36m for second-degree hops
+    const degA = degreesForDual(a, 24, 36)
+    const degB = degreesForDual(b, 24, 36)
     const mapA = buildIdLabelMap(a as any)
     const mapB = buildIdLabelMap(b as any)
     // Overlap categories

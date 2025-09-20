@@ -892,26 +892,7 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       }
     }
     
-    // Debug logging every 60 frames (once per second at 60fps)
-    if (Math.random() < 0.016) { // ~1/60 chance
-      console.log('Draw debug:', {
-        totalNodes: nodes.length,
-        visibleNodes,
-        canvasSize: `${canvas.width}x${canvas.height}`,
-        transform: { tx, ty, scale },
-        firstNodeScreen: nodes.length > 0 ? worldToScreen(nodes[0].x, nodes[0].y) : null,
-        firstNodeWorld: nodes.length > 0 ? { x: nodes[0].x, y: nodes[0].y } : null
-      })
-      
-      // Log all node screen positions if we have few nodes
-      if (nodes.length > 0 && nodes.length <= 5) {
-        console.log('All node screen positions:', nodes.map((n, i) => ({
-          index: i,
-          world: { x: n.x, y: n.y },
-          screen: worldToScreen(n.x, n.y)
-        })))
-      }
-    }
+    // Debug logging disabled
     
     ctx.restore()
     

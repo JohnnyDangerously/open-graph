@@ -122,15 +122,18 @@ export function parseJsonTile(j: any): ParsedTile {
     const rawEdges: any[] = Array.isArray(j?.coords?.edges) ? j.coords.edges : []
     const edgeCount = Math.max(0, Math.min(60000, rawEdges.length | 0))
     const edges = new Uint16Array(edgeCount * 2)
-    const edgeWeights = new Uint8Array(edgeCount)
+    // Preserve weights with sufficient precision (months). If incoming looks like days, convert to months.
+    const edgeWeights = new Float32Array(edgeCount)
     for (let i = 0; i < edgeCount; i++) {
       const e = rawEdges[i]
       const s = Array.isArray(e) && typeof e[0] === 'number' ? e[0] : 0
       const t = Array.isArray(e) && typeof e[1] === 'number' ? e[1] : 0
-      const w = Array.isArray(e) && typeof e[2] === 'number' ? e[2] : 0
+      let w = Array.isArray(e) && typeof e[2] === 'number' ? e[2] : 0
+      // Heuristic: if weight is large (likely days), convert to months. Otherwise assume already months.
+      if (w > 400) { w = Math.round(w / 30) }
       edges[i * 2] = s < count ? s : 0
       edges[i * 2 + 1] = t < count ? t : 0
-      edgeWeights[i] = Math.min(255, Math.max(0, w))
+      edgeWeights[i] = Math.max(0, w)
     }
 
     const parsed: ParsedTile = { count, nodes, size, alpha, edges, edgeWeights, meta: j?.meta }

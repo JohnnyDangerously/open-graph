@@ -161,6 +161,15 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
     const canvas = canvasRef.current!;
     if (!canvas) return;
 
+    // Track GL context health to avoid uploads after loss/teardown
+    let alive = true;
+    const onContextLost = (e: any) => { try { e.preventDefault(); } catch {} ; alive = false; };
+    const onContextRestored = () => { /* handled by component remount */ };
+    try {
+      canvas.addEventListener('webglcontextlost', onContextLost as any, false)
+      canvas.addEventListener('webglcontextrestored', onContextRestored as any, false)
+    } catch {}
+
     // --- data (300k points, generated in chunks to avoid blocking) ---
     // Return to normal density for performance
     const N = Math.max(1, (cfg.particleCount | 0));
@@ -626,11 +635,12 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
     // removed drawLines pass
 
     const loop = () => {
-      regl.poll();
-      regl.clear({ color: [cfg.background[0], cfg.background[1], cfg.background[2], 1], depth: 1 });
-      drawOuter();
-      if (edgeCount > 0 && (isDense || showEdges || asBackground)) drawEdges();
-      draw();
+      if (!alive || !reglRef.current) { rafRef.current = null; return }
+      try { regl.poll(); } catch {}
+      try { regl.clear({ color: [cfg.background[0], cfg.background[1], cfg.background[2], 1], depth: 1 }); } catch {}
+      try { drawOuter(); } catch {}
+      try { if (edgeCount > 0 && (isDense || showEdges || asBackground)) drawEdges(); } catch {}
+      try { draw(); } catch {}
       // If background is paused, draw once and stop scheduling frames
       if (asBackground && bgPaused) { rafRef.current = null; return }
       rafRef.current = requestAnimationFrame(loop);
@@ -685,13 +695,15 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       if (ric) ric(cb, { timeout: 16 }); else setTimeout(cb, 0);
     };
     const step = (start: number) => {
+      if (!alive || !reglRef.current) return;
       const end = Math.min(N, start + CHUNK);
       fillRange(start, end);
       // upload subranges
-      posBuf.subdata(pos0.subarray(3 * start, 3 * end), 3 * start * 4);
-      sedBuf.subdata(seed.subarray(start, end), start * 4);
-      hubMaskBuf.subdata(hubMaskArr.subarray(start, end), start * 4);
-      hubAlphaBuf.subdata(hubAlphaArr.subarray(start, end), start * 4);
+      // Guard against GL context loss or destroyed buffers
+      if (alive) { try { posBuf.subdata(pos0.subarray(3 * start, 3 * end), 3 * start * 4) } catch {} }
+      if (alive) { try { sedBuf.subdata(seed.subarray(start, end), start * 4) } catch {} }
+      if (alive) { try { hubMaskBuf.subdata(hubMaskArr.subarray(start, end), start * 4) } catch {} }
+      if (alive) { try { hubAlphaBuf.subdata(hubAlphaArr.subarray(start, end), start * 4) } catch {} }
       filledRef.current = end;
       
       // Generate edges immediately at startup (no waiting for chunks)
@@ -971,7 +983,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
             }
             edgeCount = write2;
           }
-          edgeBuf.subdata(edgeData.subarray(0, edgeCount * 6));
+          try { if (alive) edgeBuf.subdata(edgeData.subarray(0, edgeCount * 6)) } catch {}
           try { if (!(window as any).__EDGE_LOGGED__) { (window as any).__EDGE_LOGGED__ = true; console.log('[edges] generated', edgeCount, 'thinned', 'of', MAX_EDGES, { isDense, showEdges, mult, M }); } } catch {}
         }
       }
@@ -987,10 +999,15 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
         try { window.removeEventListener(`login_zoom_sync_${syncKey}`, syncHandler as any as EventListener) } catch {}
       }
       window.removeEventListener('resize', resize);
+      try {
+        canvas.removeEventListener('webglcontextlost', onContextLost as any, false)
+        canvas.removeEventListener('webglcontextrestored', onContextRestored as any, false)
+      } catch {}
       if (reglRef.current) {
         try { reglRef.current.destroy(); } catch (e) { console.error('[cleanup] destroy failed', e); }
       }
       reglRef.current = null;
+      alive = false;
     };
   }, [isDense, showEdges, edgeMultiplier, fourCores, nodeScale, sideHole, sectorDensity, bgPaused, bgRotSpeed]);
 
