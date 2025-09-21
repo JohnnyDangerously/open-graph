@@ -1,8 +1,8 @@
 // TEMP: agent sanity check
-let BASE = (localStorage.getItem('API_BASE_URL') || 'http://34.236.80.1:8123').replace(/\/+$/,'')
+let BASE = (localStorage.getItem('API_BASE_URL') || 'http://localhost:8123').replace(/\/+$/,'')
 
 // Feature flag for local fake database
-const LOCAL_FAKE_DB = true
+const LOCAL_FAKE_DB = false
 
 export async function __probe_echo(input: string){
   return { ok: true, input, ts: new Date().toISOString() }
@@ -14,7 +14,11 @@ export const setApiConfig = (base?: string, bearer?: string) => {
   if (typeof base === 'string' && base.length) setApiBase(base)
   if (typeof bearer === 'string') { BEARER = bearer || ''; try { localStorage.setItem('API_BEARER', BEARER) } catch {} }
 }
-const authHeaders = () => (BEARER ? { Authorization: `Bearer ${BEARER}` } : {})
+const authHeaders = (): Headers => {
+  const h = new Headers()
+  if (BEARER) h.set('Authorization', `Bearer ${BEARER}`)
+  return h
+}
 
 async function asJSON(r: Response){
   const ct = r.headers.get('content-type') || ''
@@ -100,24 +104,36 @@ export async function resolveCompany(q: string){
   // Use fake data if feature flag is enabled
   if (LOCAL_FAKE_DB) {
     if (s.toLowerCase() === 'testco') {
-      return { id: 'cmp_TEST', name: 'TestCo' }
+      return `company:TEST`
     }
     return null
   }
   
-  // Real ClickHouse implementation
+  // Real ClickHouse implementation against via_test.companies
   const base = getApiBase()
-  // domain match
+  // If already in canonical form
+  if (/^company:\d+$/i.test(s)) return s
+  
+  // Try domain exact match if it looks like a domain
   if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(s)){
-    const url = `${base}/?query=${encodeURIComponent(`SELECT toString(company_id_64) AS id FROM via_test.companies_large WHERE domain = '${s}' LIMIT 1`)}&default_format=JSONEachRow`
-    const r = await fetch(url, { headers: { ...authHeaders() } }); const t = await r.text(); const row = t.trim().split('\n').filter(Boolean)[0]
+    const url = `${base}/?query=${encodeURIComponent(`SELECT toString(company_id_64) AS id FROM via_test.companies WHERE domain = '${s.replace(/'/g,"''")}' LIMIT 1`)}&default_format=JSONEachRow`
+    const r = await fetch(url, { headers: { ...authHeaders() } })
+    const t = await r.text(); const row = t.trim().split('\n').filter(Boolean)[0]
     if (row){ const j = JSON.parse(row); return `company:${j.id}` }
   }
-  // name search
-  const sql = `SELECT toString(company_id_64) AS id FROM via_test.companies_large WHERE positionCaseInsensitive(name, '${s.replace(/'/g,"''")}') > 0 ORDER BY employee_count DESC LIMIT 1`
-  const url = `${base}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`
-  const r = await fetch(url); const t = await r.text(); const row = t.trim().split('\n').filter(Boolean)[0]
-  if (row){ const j = JSON.parse(row); return `company:${j.id}` }
+  
+  // Fallback: name contains (case-insensitive); prefer deterministic order
+  const sql = `SELECT toString(company_id_64) AS id
+               FROM via_test.companies
+               WHERE positionCaseInsensitive(name, '${s.replace(/'/g,"''")}') > 0
+               ORDER BY name ASC
+               LIMIT 1`
+  {
+    const url = `${base}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`
+    const r = await fetch(url, { headers: { ...authHeaders() } })
+    const t = await r.text(); const row = t.trim().split('\n').filter(Boolean)[0]
+    if (row){ const j = JSON.parse(row); return `company:${j.id}` }
+  }
   return null
 }
 
@@ -319,8 +335,9 @@ export async function fetchEgoBinary(id: string, limit=1500){
 
     return { buf, meta: { nodes: metaNodes }, labels } as any;
   } catch (error) {
-    console.error('Error fetching ego graph:', error);
-    throw new Error(`Failed to fetch graph data: ${error.message}`);
+    const msg = (error && (error as any).message) ? (error as any).message : String(error)
+    console.error('Error fetching ego graph:', msg)
+    throw new Error(`Failed to fetch graph data: ${msg}`)
   }
 }
 
@@ -542,24 +559,52 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
 export async function fetchCompanyEgoJSON(id: string, limit = 1500){
   if (!id.startsWith('company:')) throw new Error('company ego requires company:<id>')
   const key = id.replace(/^company:/,'')
-  const sql = `
-    WITH emp AS (
-      SELECT person_id, count() AS c
-      FROM via_test.stints_large
-      WHERE company_id = ${key}
-      GROUP BY person_id
-      ORDER BY c DESC
-      LIMIT ${Math.min(limit, 1000)}
-    )
-    SELECT e.person_id AS id, e.c AS w, anyLast(p.name) AS name, argMax(s.title, ifNull(s.end_date, today())) AS title
-    FROM emp e
-    LEFT JOIN via_test.persons_large p ON p.person_id_64 = e.person_id
-    LEFT JOIN via_test.stints_large s ON s.person_id_64 = e.person_id
-    GROUP BY id, w
-  `
-  const url = `${BASE}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`
-  const res = await fetch(url, { headers: { ...authHeaders() } }); if (!res.ok) throw new Error('company ego fetch failed')
-  const text = await res.text()
+  const tryQueries: string[] = [
+    // Variant A: stints uses *_64 and persons_large.full_name
+    `WITH emp AS (
+       SELECT toUInt64(person_id_64) AS person_id, count() AS c
+       FROM via_test.stints
+       WHERE toUInt64(company_id_64) = toUInt64(${key})
+       GROUP BY person_id
+       ORDER BY c DESC
+       LIMIT ${Math.min(limit, 1000)}
+     )
+     SELECT e.person_id AS id,
+            e.c AS w,
+            anyLast(p.full_name) AS name,
+            argMax(s.title, ifNull(s.end_date, today())) AS title
+     FROM emp e
+     LEFT JOIN via_test.persons_large p ON p.person_id_64 = e.person_id
+     LEFT JOIN via_test.stints s ON toUInt64(s.person_id_64) = e.person_id
+     GROUP BY id, w`,
+    // Variant B: stints uses non-*_64 and persons_large.name
+    `WITH emp AS (
+       SELECT toUInt64(person_id) AS person_id, count() AS c
+       FROM via_test.stints
+       WHERE toUInt64(company_id) = toUInt64(${key})
+       GROUP BY person_id
+       ORDER BY c DESC
+       LIMIT ${Math.min(limit, 1000)}
+     )
+     SELECT e.person_id AS id,
+            e.c AS w,
+            anyLast(p.name) AS name,
+            argMax(s.title, ifNull(s.end_date, today())) AS title
+     FROM emp e
+     LEFT JOIN via_test.persons_large p ON p.person_id_64 = e.person_id
+     LEFT JOIN via_test.stints s ON toUInt64(s.person_id) = e.person_id
+     GROUP BY id, w`
+  ]
+
+  let text = ''
+  let ok = false
+  for (const sql of tryQueries){
+    const url = `${BASE}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`
+    const res = await fetch(url, { headers: { ...authHeaders() } })
+    text = await res.text()
+    if (res.ok) { ok = true; break }
+  }
+  if (!ok) throw new Error('company ego fetch failed')
   const rows = text.trim() ? text.trim().split('\n').map(l=>JSON.parse(l)) : [] as Array<{id:number; w:number; name:string, title?: string}>
   const count = 1 + rows.length
   const nodes: Array<[number,number]> = new Array(count)
@@ -585,21 +630,91 @@ export async function fetchCompanyEgoJSON(id: string, limit = 1500){
 }
 
 // Company contacts function
-export async function companyContacts(companyName: string) {
-  const s = companyName.trim()
+export async function companyContacts(companyName: string, opts?: { currentOnly?: boolean }) {
+  const s = (companyName || '').trim()
+  if (!s) return []
   
   // Use fake data if feature flag is enabled
   if (LOCAL_FAKE_DB) {
     if (s.toLowerCase() === 'testco') {
       return [
-        { id: 'person_1', name: 'John Smith', title: 'Software Engineer', company: 'TestCo' },
-        { id: 'person_2', name: 'Jane Doe', title: 'Product Manager', company: 'TestCo' }
+        { id: '1', name: 'John Smith', title: 'Software Engineer', company: 'TestCo' },
+        { id: '2', name: 'Jane Doe', title: 'Product Manager', company: 'TestCo' }
       ]
     }
     return []
   }
   
-  // Real ClickHouse implementation would go here
-  // For now, return empty array
-  return []
+  const base = getApiBase()
+  
+  // Resolve to company id (string)
+  let cid: string | null = null
+  if (/^company:\d+$/i.test(s)) {
+    cid = s.replace(/^company:/i,'')
+  } else {
+    const rc = await resolveCompany(s)
+    if (rc && /^company:\d+$/.test(rc)) cid = rc.replace(/^company:/,'')
+  }
+  if (!cid) return []
+  
+  // Build contacts query: rank current stints first, then by most recent start/end; optional current-only filter; limit 25
+  const only = opts?.currentOnly === true
+  const buildSQL = (use64: boolean) => `
+    WITH base AS (
+      SELECT
+        toUInt64(${use64 ? 'person_id_64' : 'person_id'}) AS pid,
+        title,
+        start_date,
+        end_date,
+        seniority_bucket,
+        (end_date IS NULL) AS is_current,
+        greatest(
+          toDateTime64(ifNull(end_date, now()), 0),
+          toDateTime64(ifNull(start_date, now()), 0)
+        ) AS recent_ts
+      FROM via_test.stints
+      WHERE toUInt64(${use64 ? 'company_id_64' : 'company_id'}) = toUInt64(${cid})${only ? ` AND end_date IS NULL` : ``}
+    ), ranked AS (
+      SELECT
+        pid,
+        argMax(title, tuple(is_current, recent_ts)) AS title,
+        argMax(start_date, tuple(is_current, recent_ts)) AS start_date,
+        argMax(end_date, tuple(is_current, recent_ts)) AS end_date,
+        argMax(seniority_bucket, tuple(is_current, recent_ts)) AS seniority,
+        max(is_current) AS has_current,
+        max(recent_ts) AS recent_ts
+      FROM base
+      GROUP BY pid
+    )
+    SELECT
+      toString(r.pid) AS id,
+      anyLast(p.full_name) AS name,
+      r.title AS title,
+      toString(r.start_date) AS start_date,
+      toString(r.end_date) AS end_date,
+      toInt32(r.seniority) AS seniority,
+      anyLast(c.name) AS company
+    FROM ranked r
+    LEFT JOIN via_test.persons_large p ON p.person_id_64 = r.pid
+    LEFT JOIN via_test.companies c ON c.company_id_64 = toUInt64(${cid})
+    ORDER BY 
+      has_current DESC,
+      recent_ts DESC
+    LIMIT 25
+  `
+  const tryOnce = async (use64: boolean) => {
+    const sql = buildSQL(use64)
+    const url = `${base}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`
+    const res = await fetch(url, { headers: { ...authHeaders() } })
+    const text = await res.text()
+    if (!res.ok) throw new Error(`companyContacts failed ${res.status}: ${text.slice(0,120)}`)
+    const lines = text.trim() ? text.trim().split('\n').filter(Boolean) : []
+    return lines
+  }
+  let lines = await tryOnce(true)
+  if (lines.length === 0) {
+    try { lines = await tryOnce(false) } catch {}
+  }
+  if (lines.length === 0) return []
+  try { return lines.map(l=>JSON.parse(l)) as Array<{ id: string, name: string, title: string|null, company: string|null, start_date?: string|null, end_date?: string|null, seniority?: number|null }> } catch { return [] }
 }

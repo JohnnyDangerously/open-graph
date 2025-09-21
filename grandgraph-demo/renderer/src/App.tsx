@@ -2,6 +2,7 @@ import React, { useRef, useState, useEffect } from "react";
 import CanvasScene from "./graph/CanvasScene";
 import CommandBar from "./ui/CommandBar";
 import HUD from "./ui/HUD";
+import CompanyContacts from "./ui/CompanyContacts";
 import Settings from "./ui/Settings";
 import Sidebar from "./ui/Sidebar";
 import { setApiConfig } from "./lib/api";
@@ -27,13 +28,14 @@ export default function App(){
   // filters removed
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [apiBase, setApiBase] = useState<string>(()=>{
-    try { return localStorage.getItem('API_BASE') || "http://34.192.99.41" } catch { return "http://34.192.99.41" }
+    try { return localStorage.getItem('API_BASE_URL') || "http://localhost:8123" } catch { return "http://localhost:8123" }
   });
   const [bearer, setBearer] = useState<string>(()=>{
     try { return localStorage.getItem('API_BEARER') || "" } catch { return "" }
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [concentric, setConcentric] = useState(false);
+  const [showContacts, setShowContacts] = useState(false);
   // demo state removed
   const [spawnDir, setSpawnDir] = useState(0) // 0:N,1:E,2:S,3:W
   const [selectedRegion, setSelectedRegion] = useState<null | 'left' | 'right' | 'overlap'>(null)
@@ -560,7 +562,15 @@ export default function App(){
         {jobFilter && <button onClick={()=> setJobFilter(null)} style={{ padding:'6px 10px', borderRadius:8, background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.2)' }}>Clear</button>}
       </div>
       <CommandBar onRun={run} />
+      {/* AgentProbe removed from main UI (kept file for diagnostics) */}
       <HUD focus={focus} nodes={nodeCount} fps={fps} selectedIndex={selectedIndex} concentric={concentric} onToggleConcentric={()=>setConcentric(c=>!c)} onSettings={()=>setShowSettings(true)} onBack={()=>{ if(cursor>0 && history[cursor]){ const cur=history[cursor]; const prev=history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); run(prev.id, { pushHistory:false, overrideMove:{ x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) } }} onForward={()=>{ if(cursor<history.length-1){ const next=history[cursor+1]; setCursor(cursor+1); if (next?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: next.turn||0 } })); run(next.id, { pushHistory:false, overrideMove:{ x: next?.move?.x||0, y: next?.move?.y||0 } }) } }} canBack={cursor>0} canForward={cursor<history.length-1} />
+      {/* Top-left nav for panels */}
+      <div style={{ position:'absolute', top:12, left:12, zIndex:16, display:'flex', gap:8 }}>
+        <button onClick={()=> setShowContacts(s=>!s)} style={{ padding:'8px 10px', borderRadius:10, background: showContacts? '#4f7cff' : 'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.15)' }}>Company Contacts</button>
+      </div>
+      {showContacts && (
+        <CompanyContacts />
+      )}
       {/* demo buttons removed */}
       {err && (
         <div style={{ position:'absolute', top:52, left:12, right:12, padding:'10px 12px', background:'rgba(200,40,60,0.2)', border:'1px solid rgba(255,80,100,0.35)', color:'#ffbfc9', borderRadius:10, zIndex:11 }}>
