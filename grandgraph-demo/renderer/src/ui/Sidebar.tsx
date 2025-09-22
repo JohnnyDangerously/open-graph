@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 
-export default function Sidebar({ open=true, onToggle, items, onSelect, onDoubleSelect }:{ open?: boolean, onToggle: ()=>void, items: Array<{index:number, group:number, flag?:number, name?:string, title?: string|null, avatarUrl?: string}>, onSelect: (i:number)=>void, onDoubleSelect?: (i:number)=>void }){
+export default function Sidebar({ open=true, onToggle, items, onSelect, onDoubleSelect, selectedIndex }:{ open?: boolean, onToggle: ()=>void, items: Array<{index:number, group:number, flag?:number, name?:string, title?: string|null, avatarUrl?: string}>, onSelect: (i:number)=>void, onDoubleSelect?: (i:number)=>void, selectedIndex?: number|null }){
   const [isOpen, setIsOpen] = useState(open)
   const toggle = ()=>{ setIsOpen(!isOpen); onToggle() }
   return (
@@ -10,8 +10,10 @@ export default function Sidebar({ open=true, onToggle, items, onSelect, onDouble
         <div style={{ position:'absolute', right:0, top:0, bottom:0, width:320, padding:'42px 12px 12px 12px', background:'rgba(12,14,22,0.9)', borderLeft:'1px solid rgba(255,255,255,0.08)', backdropFilter:'blur(8px)', color:'#fff', overflow:'auto' }}>
           <div style={{ fontSize:16, marginBottom:10, opacity:0.85 }}>Nodes</div>
           <div style={{ display:'grid', gap:6 }}>
-            {items.slice(0,300).map((it)=> (
-              <div key={it.index} onClick={()=>onSelect(it.index)} onDoubleClick={()=> onDoubleSelect?.(it.index)} style={{ padding:'8px 10px', borderRadius:8, background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.08)', cursor:'pointer' }}>
+            {items.slice(0,300).map((it)=> {
+              const isSel = typeof selectedIndex==='number' && selectedIndex===it.index
+              return (
+              <div key={it.index} onClick={()=>onSelect(it.index)} onDoubleClick={()=> onDoubleSelect?.(it.index)} style={{ padding:'8px 10px', borderRadius:8, background: isSel? 'rgba(255,255,255,0.14)':'rgba(255,255,255,0.06)', border: isSel? '1px solid rgba(255,255,255,0.55)':'1px solid rgba(255,255,255,0.08)', cursor:'pointer' }}>
                 <div style={{ display:'flex', alignItems:'center', gap:8 }}>
                   {it.avatarUrl ? (
                     <img src={it.avatarUrl} alt={it.name || `#${it.index}`}
@@ -27,7 +29,7 @@ export default function Sidebar({ open=true, onToggle, items, onSelect, onDouble
                   </div>
                 </div>
               </div>
-            ))}
+            )})}
           </div>
         </div>
       )}

@@ -1,66 +1,466 @@
-import React, { useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import type { EvaluationResult, HistoryEntry, Suggestion, Token, FilterToken } from "../crux/types";
+import { parseExpression } from "../crux/parser";
+import { evaluate } from "../crux/evaluator";
+import { getSuggestions } from "../crux/suggestions";
 
-export default function CommandBar({ onRun, placeholder }: { onRun: (cmd: string)=>void, placeholder?: string }){
-  const inputRef = useRef<HTMLInputElement>(null);
+import "./CommandBar.css";
+
+type Mode = "hierarchy" | "radial" | "grid" | "concentric";
+
+type CommandBarProps = {
+  onRun: (expression: string, evaluation: EvaluationResult | null) => void | Promise<void>;
+  placeholder?: string;
+  focus?: string | null;
+  selectedIndex?: number | null;
+  nodes?: number;
+  fps?: number;
+  onBack?: () => void;
+  onForward?: () => void;
+  canBack?: boolean;
+  canForward?: boolean;
+  onReshape?: (mode: Mode) => void;
+  onSettings?: () => void;
+  history?: HistoryEntry[];
+  quickExamples?: Array<{ label: string; expression: string }>;
+  onPreview?: (evaluation: EvaluationResult | null) => void;
+};
+
+const DEBOUNCE_MS = 180;
+
+const defaultExamples: Array<{ label: string; expression: string }> = [
+  { label: "Bridge", expression: "google.com ^ openai.com > role:engineer time:24mo" },
+  { label: "Flows", expression: "google.com * acme.io > time:24mo" },
+  { label: "Compare", expression: "google.com >< openai.com > top:50" },
+  { label: "Reach", expression: "@me ↗ trust:80 hops:2" },
+];
+
+function classNames(...values: Array<string | false | null | undefined>) {
+  return values.filter(Boolean).join(" ");
+}
+
+const chipType = (token: Token): string => {
+  if (token.type === "entity" || token.type === "macro-ref") return "entity";
+  if (token.type === "operator" || token.type === "set-op") return "operator";
+  if (token.type === "filter") return "filter";
+  if (token.type === "view") return "view";
+  if (token.type === "pipe" || token.type === "action") return "pipe";
+  if (token.type === "explain") return "explain";
+  if (token.type === "macro-def") return "macro";
+  return "literal";
+};
+
+export default function CommandBar(props: CommandBarProps) {
+  const {
+    onRun,
+    placeholder,
+    focus,
+    selectedIndex,
+    nodes,
+    fps,
+    onBack,
+    onForward,
+    canBack,
+    canForward,
+    onReshape,
+    onSettings,
+    history = [],
+    quickExamples = defaultExamples,
+    onPreview,
+  } = props;
+
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [value, setValue] = useState("");
+  const [selectionStart, setSelectionStart] = useState(0);
+  const [selectionEnd, setSelectionEnd] = useState(0);
+  const [activeSuggestion, setActiveSuggestion] = useState(0);
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [evaluation, setEvaluation] = useState<EvaluationResult | null>(null);
+  const [evaluating, setEvaluating] = useState(false);
+  const [warningsOpen, setWarningsOpen] = useState(false);
+
+  const expression = useMemo(() => parseExpression(value), [value]);
+
+  useEffect(() => {
+    const sugg = getSuggestions(expression, selectionStart, history);
+    setSuggestions(sugg);
+    setActiveSuggestion(0);
+  }, [expression, selectionStart, history]);
+
+  useEffect(() => {
+    if (!value.trim()) {
+      setEvaluation(null);
+      onPreview?.(null);
+      return;
+    }
+    setEvaluating(true);
+    const controller = new AbortController();
+    const handle = window.setTimeout(async () => {
+      try {
+        const result = await evaluate(value, { history, signal: controller.signal });
+        setEvaluation(result);
+        onPreview?.(result);
+        setEvaluating(false);
+      } catch (error: any) {
+        if (error?.name === "AbortError") return;
+        console.warn("evaluate failed", error);
+        setEvaluation(null);
+        onPreview?.(null);
+        setEvaluating(false);
+      }
+    }, DEBOUNCE_MS);
+    return () => {
+      controller.abort();
+      window.clearTimeout(handle);
+      setEvaluating(false);
+    };
+  }, [value, history, onPreview]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const next = e.target.value;
+    setValue(next);
+    setSelectionStart(e.target.selectionStart ?? next.length);
+    setSelectionEnd(e.target.selectionEnd ?? e.target.selectionStart ?? next.length);
+  };
+
+  const handleSelect = (e: React.SyntheticEvent<HTMLTextAreaElement>) => {
+    const target = e.target as HTMLTextAreaElement;
+    setSelectionStart(target.selectionStart ?? 0);
+    setSelectionEnd(target.selectionEnd ?? target.selectionStart ?? 0);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "ArrowDown") {
+      if (suggestions.length) {
+        e.preventDefault();
+        setActiveSuggestion((idx) => (idx + 1) % suggestions.length);
+      }
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      if (suggestions.length) {
+        e.preventDefault();
+        setActiveSuggestion((idx) => (idx - 1 + suggestions.length) % suggestions.length);
+      }
+      return;
+    }
+    if (e.key === "Tab") {
+      if (suggestions.length) {
+        e.preventDefault();
+        applySuggestion(suggestions[activeSuggestion] ?? suggestions[0]);
+      }
+      return;
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      runExpression();
+      return;
+    }
+    if (e.key === "Escape") {
+      if (suggestions.length) {
+        e.preventDefault();
+        setSuggestions([]);
+      }
+    }
+  };
+
+  const applySuggestion = (suggestion: Suggestion) => {
+    const activeToken = expression.tokens.find((tok) => selectionStart >= tok.start && selectionStart <= tok.end);
+    let replaceStart = selectionStart;
+    let replaceEnd = selectionEnd;
+    if (activeToken) {
+      if (activeToken.type === "filter") {
+        const filterToken = activeToken as FilterToken;
+        const colonIx = activeToken.raw.indexOf(":");
+        if (suggestion.type === "filter") {
+          replaceStart = activeToken.start;
+          replaceEnd = activeToken.start + (colonIx > -1 ? colonIx + 1 : filterToken.key?.length ?? 0);
+        } else {
+          replaceStart = colonIx > -1 ? activeToken.start + colonIx + 1 : activeToken.end;
+          replaceEnd = activeToken.end;
+        }
+      } else {
+        replaceStart = activeToken.start;
+        replaceEnd = activeToken.end;
+      }
+    }
+    insertAtRange(suggestion.value, replaceStart, replaceEnd, shouldPadAfter(suggestion));
+  };
+
+  const shouldPadAfter = (suggestion: Suggestion) => {
+    if (suggestion.type === "operator" || suggestion.type === "entity" || suggestion.type === "history" || suggestion.type === "view") return true;
+    return false;
+  };
+
+  const insertAtRange = (textToInsert: string, start: number, end: number, pad = false) => {
+    const before = value.slice(0, start);
+    const after = value.slice(end);
+    const needsSpace = pad && !/\s$/.test(before);
+    const nextValue = `${before}${needsSpace ? " " : ""}${textToInsert}${pad && after && !/^\s/.test(after) ? " " : ""}${after}`;
+    const cursor = (before.length + (needsSpace ? 1 : 0) + textToInsert.length + (pad ? 1 : 0));
+    setValue(nextValue);
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (el) {
+        el.focus();
+        el.selectionStart = el.selectionEnd = cursor;
+      }
+    });
+  };
+
+  const runExpression = async () => {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    let result = evaluation;
+    if (!result || result.expression.text !== trimmed) {
+      try {
+        result = await evaluate(trimmed, { history });
+        setEvaluation(result);
+      } catch (error: any) {
+        console.warn("evaluate execution failed", error);
+      }
+    }
+    await onRun(trimmed, result ?? null);
+    setWarningsOpen(false);
+    setTimeout(() => {
+      setValue("");
+      setEvaluation(null);
+      onPreview?.(null);
+      setSelectionStart(0);
+      setSelectionEnd(0);
+      setSuggestions([]);
+    }, 10);
+  };
+
+  const ghostCounts = useMemo(() => {
+    if (!evaluation?.viewModel) return null;
+    if (evaluation.viewModel.view === "graph" && Array.isArray((evaluation.viewModel as any).bridges)) {
+      return `${(evaluation.viewModel as any).bridges.length} bridges`;
+    }
+    if (evaluation.viewModel.view === "flows") {
+      return `${(evaluation.viewModel as any).pairs.length} flows`;
+    }
+    if (evaluation.viewModel.view === "list") {
+      if ((evaluation.viewModel as any).filters) return `${Object.keys((evaluation.viewModel as any).filters).length} filters`;
+      return `list ready`;
+    }
+    return null;
+  }, [evaluation]);
+
   return (
-    <div style={{ position:"absolute", bottom:10, left:"50%", transform:"translateX(-50%)", width:"calc(100% - 4in)", zIndex:20 }}>
-      <div style={{ position:'relative' }}>
-        <input
-          ref={inputRef}
-          list="cmd-suggestions"
-          placeholder={placeholder || "show person:<name> • compare <a> + <b> • suggest best compare • clear"}
-          onKeyDown={(e)=>{
-            if (e.key === "Enter") {
-              const v = (e.target as HTMLInputElement).value.trim();
-              if (v) onRun(v);
-              (e.target as HTMLInputElement).value = "";
-            }
-          }}
-          style={{
-            width:"100%", padding:"12px 14px", paddingRight:170, borderRadius:14,
-            background:"rgba(10,10,20,0.7)", border:"1px solid rgba(255,255,255,0.12)", color:"#fff",
-            boxShadow:"0 6px 24px rgba(0,0,0,0.35)", outline:"none"
-          }}
-        />
-        <div style={{ position:'absolute', right:8, top:6, display:'flex', gap:8 }}>
-          <button
-            onClick={()=>{ const v = 'bridges Apple + Microsoft'; onRun(v); try{ if(inputRef.current) inputRef.current.value=''; }catch{} }}
-            title="Run a Bridges demo between Apple and Microsoft"
-            style={{ padding:'8px 10px', borderRadius:10, background:'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', cursor:'pointer' }}
-          >Bridges demo</button>
-          <button
-            onClick={()=>{ const v = 'compare Alice + Bob'; onRun(v); try{ if(inputRef.current) inputRef.current.value=''; }catch{} }}
-            title="Run a Compare demo"
-            style={{ padding:'8px 10px', borderRadius:10, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.16)', cursor:'pointer' }}
-          >Compare demo</button>
-          <button
-            onClick={()=>{ const v = 'suggest best compare'; onRun(v); try{ if(inputRef.current) inputRef.current.value=''; }catch{} }}
-            title="Find and load a high-contrast pair"
-            style={{ padding:'8px 10px', borderRadius:10, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.16)', cursor:'pointer' }}
-          >Best pair</button>
+    <div className="crux-shell">
+      <div className="crux-topline">
+        <div className="crux-focus-card">
+          <div className="crux-focus-title">Focus</div>
+          <div className="crux-focus-body">{focus ?? "(none)"}</div>
+          {typeof selectedIndex === "number" && selectedIndex >= 0 && (
+            <div className="crux-focus-foot">Selected #{selectedIndex}</div>
+          )}
+        </div>
+        {nodes != null && (
+          <div className="crux-stats">
+            {nodes.toLocaleString()} nodes {typeof fps === "number" ? `• ${Math.round(fps)} FPS` : ""}
+          </div>
+        )}
+        <div className="crux-nav">
+          {onBack && <button className="crux-nav-btn" onClick={onBack} disabled={!canBack}>Back</button>}
+          {onForward && <button className="crux-nav-btn" onClick={onForward} disabled={!canForward}>Forward</button>}
         </div>
       </div>
-      <datalist id="cmd-suggestions">
-        <option value="show person:Andrew Rogers" />
-        <option value="show person:https://linkedin.com/in/andrew-rogers-10" />
-        <option value="show person:Jordan Lee" />
-        <option value="show person:https://linkedin.com/in/jordan-lee-abc123" />
-        <option value="show person:Emily Chen" />
-        <option value="show person:https://linkedin.com/in/emily-chen-xyz789" />
-        <option value="show person:Michael Patel" />
-        <option value="show person:https://linkedin.com/in/michael-patel-456def" />
-        <option value="show company:Apple Inc." />
-        <option value="show company:apple.com" />
-        <option value="show company:Google LLC" />
-        <option value="show company:google.com" />
-        <option value="bridges Apple + Microsoft" />
-        <option value="compare Andrew Rogers + Emily Chen" />
-        <option value="Jordan Lee + Michael Patel" />
-        <option value="suggest best compare" />
-        <option value="clear" />
-      </datalist>
+
+      <div className="crux-input-wrap">
+        <div className="crux-chip-row">
+          {expression.tokens.map((token) => (
+            <span key={token.id} className={classNames("crux-chip", `crux-chip-${chipType(token)}`)}>
+              {prettyLabel(token)}
+            </span>
+          ))}
+        </div>
+        <textarea
+          ref={inputRef}
+          value={value}
+          placeholder={placeholder || "google.com ^ openai.com > role:engineer time:24mo @view:graph"}
+          onChange={handleChange}
+          onSelect={handleSelect}
+          onKeyDown={handleKeyDown}
+          className={classNames("crux-input", evaluating && "crux-input-loading")}
+          rows={2}
+        />
+        {ghostCounts && <div className="crux-ghost-count">{ghostCounts}</div>}
+        {suggestions.length > 0 && (
+          <div className="crux-suggestions">
+            {suggestions.map((sugg, idx) => (
+              <button
+                key={sugg.id}
+                className={classNames("crux-suggestion", idx === activeSuggestion && "is-active")}
+                onMouseDown={(e) => { e.preventDefault(); applySuggestion(sugg); }}
+              >
+                <span className="crux-suggestion-value">{sugg.value}</span>
+                <span className="crux-suggestion-desc">{sugg.description}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <PreviewCard
+        evaluation={evaluation}
+        evaluating={evaluating}
+        onToggleWarnings={() => setWarningsOpen((open) => !open)}
+        warningsOpen={warningsOpen}
+      />
+
+      <div className="crux-toolbar">
+        <div className="crux-example-row">
+          {quickExamples.map((ex) => (
+            <button key={ex.label} className="crux-pill" onClick={() => {
+              setValue(ex.expression);
+              requestAnimationFrame(() => {
+                const el = inputRef.current;
+                if (el) {
+                  el.focus();
+                  el.selectionStart = el.selectionEnd = ex.expression.length;
+                }
+              });
+            }}>
+              {ex.label}
+            </button>
+          ))}
+        </div>
+        {onReshape && (
+          <div className="crux-layout-switch">
+            <span>Layout</span>
+            <button onClick={() => onReshape("hierarchy")}>Hierarchy</button>
+            <button onClick={() => onReshape("radial")}>Radial</button>
+            <button onClick={() => onReshape("grid")}>Grid</button>
+            <button onClick={() => onReshape("concentric")}>Concentric</button>
+          </div>
+        )}
+        {onSettings && <button className="crux-settings" onClick={onSettings}>Settings</button>}
+      </div>
     </div>
   );
 }
 
+function prettyLabel(token: Token): string {
+  if (token.type === "filter") return `${token.key}:${token.valueRaw}`;
+  if (token.type === "operator") return token.raw;
+  if (token.type === "set-op") return token.raw;
+  return token.raw;
+}
 
+type PreviewProps = {
+  evaluation: EvaluationResult | null;
+  evaluating: boolean;
+  warningsOpen: boolean;
+  onToggleWarnings: () => void;
+};
+
+function PreviewCard({ evaluation, evaluating, warningsOpen, onToggleWarnings }: PreviewProps) {
+  if (evaluating) {
+    return (
+      <div className="crux-preview">
+        <div className="crux-preview-title">Synthesizing…</div>
+        <div className="crux-spinner" />
+      </div>
+    );
+  }
+  if (!evaluation || !evaluation.viewModel) {
+    return (
+      <div className="crux-preview crux-preview-empty">
+        Start typing to preview bridges, flows, or cohorts instantly.
+      </div>
+    );
+  }
+  const { viewModel, warnings } = evaluation;
+  return (
+    <div className="crux-preview">
+      <div className="crux-preview-header">
+        <span className="crux-preview-title">{viewModel.view.toUpperCase()} preview</span>
+        <span className="crux-preview-meta">{(evaluation.durationMs ?? 0).toFixed(0)} ms</span>
+      </div>
+      <div className="crux-preview-body">
+        {renderViewModel(viewModel)}
+      </div>
+      {warnings.length > 0 && (
+        <div className="crux-preview-warnings">
+          <button onClick={onToggleWarnings} className="crux-warning-toggle">
+            {warningsOpen ? "Hide warnings" : `${warnings.length} warning${warnings.length > 1 ? "s" : ""}`}
+          </button>
+          {warningsOpen && (
+            <ul>
+              {warnings.map((w, idx) => (
+                <li key={idx}>{w}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderViewModel(viewModel: EvaluationResult["viewModel"]) {
+  if (!viewModel) return null;
+  if (viewModel.view === "graph") {
+    const bridges = (viewModel as any).bridges || [];
+    return (
+      <div className="crux-card-grid">
+        {bridges.slice(0, 6).map((bridge: any) => (
+          <div key={bridge.id || bridge.name} className="crux-card">
+            <div className="crux-card-title">{bridge.name}</div>
+            <div className="crux-card-sub">score {bridge.score.toFixed?.(1) ?? bridge.score}</div>
+            <div className="crux-card-meta">L:{bridge.stats?.left ?? "-"} • R:{bridge.stats?.right ?? "-"}</div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (viewModel.view === "flows") {
+    const vm = viewModel as any;
+    const pairs = vm.pairs || [];
+    return (
+      <div className="crux-card-grid">
+        {pairs.slice(0, 6).map((pair: any) => (
+          <div key={`${pair.from}-${pair.to}`} className="crux-card">
+            <div className="crux-card-title">{pair.from} → {pair.to}</div>
+            <div className="crux-card-sub">{pair.count.toLocaleString()} movers</div>
+            {pair.delta != null && <div className="crux-card-meta">avg dwell {Math.round(pair.delta)} days</div>}
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (viewModel.view === "list") {
+    const vm = viewModel as any;
+    if (vm.filters) {
+      return (
+        <div className="crux-list">
+          {Object.entries(vm.filters).map(([key, val]) => (
+            <div key={key} className="crux-list-row">
+              <span>{key}</span>
+              <span>{val}</span>
+            </div>
+          ))}
+        </div>
+      );
+    }
+    return (
+      <div className="crux-list">
+        <div className="crux-list-row">
+          <span>Overlap</span>
+          <span>{vm.overlap}</span>
+        </div>
+        <div className="crux-list-row">
+          <span>Unique A</span>
+          <span>{vm.uniqueA}</span>
+        </div>
+        <div className="crux-list-row">
+          <span>Unique B</span>
+          <span>{vm.uniqueB}</span>
+        </div>
+      </div>
+    );
+  }
+  return null;
+}

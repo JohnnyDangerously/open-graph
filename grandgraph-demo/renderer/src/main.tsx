@@ -2,12 +2,10 @@ import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import LoginScene from "./graph/LoginScene";
-import UXDemoScene from "./graph/UXDemoScene";
+// UX demo removed
 
 function Root(){
-  const [view, setView] = useState<'app'|'ux'>(()=>{
-    try { return (new URLSearchParams(window.location.search).get('view') === 'ux') ? 'ux' : 'app' } catch { return 'app' }
-  })
+  const [view, setView] = useState<'app'>('app')
   const [connected, setConnected] = useState(false)
   const [blend, setBlend] = useState(false)
   const [dense, setDense] = useState<boolean>(()=>{
@@ -110,23 +108,15 @@ function Root(){
   }, [showLogin])
   return (
     <div style={{ position:'fixed', inset:0 }}>
-      {view === 'ux' && (
-        <div style={{ position:'absolute', inset:0, zIndex:1000 }}>
-          <UXDemoScene />
-        </div>
-      )}
+      {/* UX demo removed */}
       {/* Single persistent scene: acts as login when showLogin, becomes background after connect */}
       <LoginScene asBackground={!showLogin} dense={dense} palette={palette} brightness={brightness} showEdges={showEdges} edgeMultiplier={edgeMultiplier} fourCores={fourCores} nodeScale={nodeScale} edgeFraction={edgeFraction} edgeAlpha={edgeAlpha} sizeScale={sizeScale} rotSpeed={rotSpeed} edgeColor={edgeColor} sideHole={sideHole} sectorDensity={sectorDensity} bgPaused={bgPaused} bgRotSpeed={bgRotSpeed} syncKey="bg" onDone={()=>{ try{ sessionStorage.setItem('logged_in','1') }catch{}; setConnected(true); setBlend(true); setTimeout(()=>setBlend(false), 260); }} onConnect={()=>{ try{ sessionStorage.setItem('logged_in','1') }catch{}; setConnected(true); setBlend(true); setTimeout(()=>setBlend(false), 260); }} />
       {/* App on top */}
-      <div style={{ position:'absolute', inset:0, opacity: (!showLogin || connected) ? 1 : (blend ? 1 : 0), transition:'opacity 260ms linear', pointerEvents: (!showLogin || connected) ? 'auto' : 'none', display: view==='ux' ? 'none' : 'block' }}>
+      <div style={{ position:'absolute', inset:0, opacity: (!showLogin || connected) ? 1 : (blend ? 1 : 0), transition:'opacity 260ms linear', pointerEvents: (!showLogin || connected) ? 'auto' : 'none' }}>
         <App />
       </div>
       {/* Tiny entry to open demo without code churn */}
-      {view !== 'ux' && (
-        <div style={{ position:'absolute', top:10, right:10, zIndex:2000 }}>
-          <a href={window.location.pathname + '?view=ux'} style={{ padding:'6px 10px', borderRadius:8, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', textDecoration:'none' }}>Open UX Demo</a>
-        </div>
-      )}
+      {/* Open UX Demo link removed */}
       {showLogin && (
         <div style={{ position:'absolute', left:0, right:0, bottom:0, zIndex:31, display:'flex', justifyContent:'center', pointerEvents:'none' }}>
           {!drawerOpen && (

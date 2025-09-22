@@ -11,6 +11,8 @@ export type ParsedTile = {
   flags?: Uint8Array
   ids?: string[]
   labels?: string[]
+  meta?: { nodes?: Array<Record<string, unknown>> | null } | null
+  focusWorld?: { x: number, y: number }
 }
 
 export function parseTile(buf: ArrayBuffer): ParsedTile {
@@ -109,34 +111,49 @@ export function parseJsonTile(j: any): ParsedTile {
     const nodes = new Float32Array(count * 2)
     const size = new Float32Array(count)
     const alpha = new Float32Array(count)
+    const group = new Uint16Array(count)
+    const metaNodes: Array<any> = Array.isArray(j?.meta?.nodes) ? j.meta.nodes : []
+    const coordGroups: Array<number> = Array.isArray(j?.coords?.groups) ? j.coords.groups : []
     for (let i = 0; i < count; i++) {
       const p = rawNodes[i]
       const x = Array.isArray(p) && typeof p[0] === 'number' ? p[0] : 0
       const y = Array.isArray(p) && typeof p[1] === 'number' ? p[1] : 0
       nodes[i * 2] = x
       nodes[i * 2 + 1] = y
-      size[i] = i === 0 ? 12 : 4
-      alpha[i] = i === 0 ? 1.0 : 0.85
+      const meta = metaNodes[i] || {}
+      const fromCoords = typeof coordGroups[i] === 'number' ? coordGroups[i] : undefined
+      const metaGroup = typeof meta.group === 'number' ? meta.group : undefined
+      const g = (fromCoords ?? metaGroup ?? (i === 0 ? 1 : 1)) >>> 0
+      group[i] = g
+      const centerBias = g === 1 ? 1 : 0
+      const baseSize = g === 1 ? 1.2 : 0.9
+      const desired = typeof meta.size === 'number' ? meta.size : (baseSize + centerBias * 0.2)
+      size[i] = Math.max(0.25, desired / 2.5)
+      alpha[i] = g === 1 ? 0.9 : 0.78
     }
 
     const rawEdges: any[] = Array.isArray(j?.coords?.edges) ? j.coords.edges : []
     const edgeCount = Math.max(0, Math.min(60000, rawEdges.length | 0))
-    const edges = new Uint16Array(edgeCount * 2)
+    const edges = new Uint32Array(edgeCount * 2)
     // Preserve weights with sufficient precision (months). If incoming looks like days, convert to months.
     const edgeWeights = new Float32Array(edgeCount)
     for (let i = 0; i < edgeCount; i++) {
       const e = rawEdges[i]
       const s = Array.isArray(e) && typeof e[0] === 'number' ? e[0] : 0
       const t = Array.isArray(e) && typeof e[1] === 'number' ? e[1] : 0
-      let w = Array.isArray(e) && typeof e[2] === 'number' ? e[2] : 0
-      // Heuristic: if weight is large (likely days), convert to months. Otherwise assume already months.
-      if (w > 400) { w = Math.round(w / 30) }
+    const w = Array.isArray(e) && typeof e[2] === 'number' ? e[2] : 0
       edges[i * 2] = s < count ? s : 0
       edges[i * 2 + 1] = t < count ? t : 0
       edgeWeights[i] = Math.max(0, w)
     }
 
-    const parsed: ParsedTile = { count, nodes, size, alpha, edges, edgeWeights, meta: j?.meta }
+    const focusWorld = (j?.focusWorld && typeof j?.focusWorld?.x === 'number' && typeof j?.focusWorld?.y === 'number')
+      ? { x: j.focusWorld.x, y: j.focusWorld.y }
+      : undefined
+    const parsed: ParsedTile = { count, nodes, size, alpha, group, edges, edgeWeights, meta: j?.meta || null, focusWorld }
+    try {
+      if (Array.isArray(j?.labels)) { (parsed as any).labels = j.labels }
+    } catch {}
     console.log('parseJsonTile: Parsed:', {
       count: parsed.count,
       nodesLength: parsed.nodes.length,
@@ -146,8 +163,6 @@ export function parseJsonTile(j: any): ParsedTile {
     return parsed
   } catch (err) {
     console.error('parseJsonTile: Failed to parse, returning empty tile:', err)
-    return { count: 0, nodes: new Float32Array(0), size: new Float32Array(0), alpha: new Float32Array(0), edges: new Uint16Array(0), edgeWeights: new Uint8Array(0) }
+    return { count: 0, nodes: new Float32Array(0), size: new Float32Array(0), alpha: new Float32Array(0), group: new Uint16Array(0), edges: new Uint32Array(0), edgeWeights: new Float32Array(0) } as any
   }
 }
-
-

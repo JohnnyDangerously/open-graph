@@ -1,16 +1,29 @@
-let BASE = (localStorage.getItem('API_BASE_URL') || 'http://34.236.80.1:8123').replace(/\/+$/,'')
-// Remember which ClickHouse HTTP transport worked last to avoid noisy fallbacks
-let PREFERRED_CH_METHOD: 'GET' | 'POST_QUERY' | 'POST_BODY' | null = ((): any => {
-  try { return (localStorage.getItem('CH_HTTP_METHOD') as any) || null } catch { return null }
-})()
-export const setApiBase = (u:string) => { BASE = u.replace(/\/+$/,''); try{ localStorage.setItem('API_BASE_URL', BASE) }catch{} }
+const normalizeBase = (u:string) => {
+  try {
+    const url = new URL(u)
+    return `${url.protocol}//${url.host}`
+  } catch {
+    return u.replace(/[?#].*$/,'').replace(/\/+$/,'')
+  }
+}
+let BASE = normalizeBase(localStorage.getItem('API_BASE_URL') || 'http://34.236.80.1:8123')
+// Helper: robust ClickHouse exec via POST to avoid URL length limits (proxies may 404 long GETs)
+async function execCH(sql: string){
+  const url = `${BASE}/?default_format=JSONEachRow`
+  return fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain; charset=utf-8', ...authHeaders() }, body: sql })
+}
+export const setApiBase = (u:string) => { BASE = normalizeBase(u); try{ localStorage.setItem('API_BASE_URL', BASE) }catch{} }
 export const getApiBase = () => BASE
 let BEARER = (localStorage.getItem('API_BEARER') || '')
 export const setApiConfig = (base?: string, bearer?: string) => {
   if (typeof base === 'string' && base.length) setApiBase(base)
   if (typeof bearer === 'string') { BEARER = bearer || ''; try { localStorage.setItem('API_BEARER', BEARER) } catch {} }
 }
-const authHeaders = () => (BEARER ? { Authorization: `Bearer ${BEARER}` } : {})
+const authHeaders = () => {
+  const h: Record<string, string> = {}
+  if (BEARER) h['Authorization'] = `Bearer ${BEARER}`
+  return h
+}
 
 async function asJSON(r: Response){
   const ct = r.headers.get('content-type') || ''
@@ -93,16 +106,13 @@ export async function resolvePerson(q: string){
 export async function resolveCompany(q: string){
   const base = getApiBase()
   const s = q.trim()
-  // Helper: run two variants to handle schema differences (company_id_64 vs company_id)
-  const execId = async (sql64: string, sql32: string) => {
-    // Try _64 first
-    let r = await fetch(`${base}/?query=${encodeURIComponent(sql64)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
-    let t = await r.text(); let row = t.trim().split('\n').filter(Boolean)[0]
-    if (row) { try { const j = JSON.parse(row); if (j && (j.id != null)) return `company:${j.id}` } catch {} }
-    // Retry non-_64
-    r = await fetch(`${base}/?query=${encodeURIComponent(sql32)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
-    t = await r.text(); row = t.trim().split('\n').filter(Boolean)[0]
-    if (row) { try { const j = JSON.parse(row); if (j && (j.id != null)) return `company:${j.id}` } catch {} }
+  // Always return the canonical UInt64 id to avoid mismatches with stints.company_id
+  const execId64 = async (whereClause: string) => {
+    const sql = `SELECT toString(company_id_64) AS id FROM via_test.companies_large WHERE ${whereClause} ORDER BY employee_count DESC LIMIT 1`
+    const r = await fetch(`${base}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
+    const t = await r.text(); const row = t.trim().split('\n').filter(Boolean)[0]
+    if (!row) return null as any
+    try { const j = JSON.parse(row); if (j && (j.id != null)) return `company:${j.id}` } catch {}
     return null as any
   }
   // Normalize potential URL or domain
@@ -123,25 +133,17 @@ export async function resolveCompany(q: string){
     const variants = Array.from(new Set([bare, `www.${bare}`]))
     const inList = variants.map(v=>`'${v.replace(/'/g,"''")}'`).join(',')
     // 1) Exact domain match with common www variants
-    const sql1_64 = `SELECT toString(company_id_64) AS id FROM via_test.companies_large WHERE domain IN (${inList}) LIMIT 1`
-    const sql1_32 = `SELECT toString(company_id) AS id FROM via_test.companies_large WHERE domain IN (${inList}) LIMIT 1`
-    const exact = await execId(sql1_64, sql1_32); if (exact) return exact
+    const exact = await execId64(`domain IN (${inList})`); if (exact) return exact
     // 2) Contains match on domain field
-    const sql2_64 = `SELECT toString(company_id_64) AS id FROM via_test.companies_large WHERE positionCaseInsensitive(domain, '${bare.replace(/'/g,"''")}') > 0 ORDER BY employee_count DESC LIMIT 1`
-    const sql2_32 = `SELECT toString(company_id) AS id FROM via_test.companies_large WHERE positionCaseInsensitive(domain, '${bare.replace(/'/g,"''")}') > 0 ORDER BY employee_count DESC LIMIT 1`
-    const contains = await execId(sql2_64, sql2_32); if (contains) return contains
+    const contains = await execId64(`positionCaseInsensitive(domain, '${bare.replace(/'/g,"''")}') > 0`); if (contains) return contains
     // 3) Fallback to name using the registrable label (e.g. google from google.com)
     const label = bare.split('.')[0]
     if (label && label.length >= 3){
-      const sql3_64 = `SELECT toString(company_id_64) AS id FROM via_test.companies_large WHERE positionCaseInsensitive(name, '${label.replace(/'/g,"''")}') > 0 ORDER BY employee_count DESC LIMIT 1`
-      const sql3_32 = `SELECT toString(company_id) AS id FROM via_test.companies_large WHERE positionCaseInsensitive(name, '${label.replace(/'/g,"''")}') > 0 ORDER BY employee_count DESC LIMIT 1`
-      const nameByLabel = await execId(sql3_64, sql3_32); if (nameByLabel) return nameByLabel
+      const nameByLabel = await execId64(`positionCaseInsensitive(name, '${label.replace(/'/g,"''")}') > 0`); if (nameByLabel) return nameByLabel
     }
   }
   // name search (general)
-  const sqlG_64 = `SELECT toString(company_id_64) AS id FROM via_test.companies_large WHERE positionCaseInsensitive(name, '${s.replace(/'/g,"''")}') > 0 ORDER BY employee_count DESC LIMIT 1`
-  const sqlG_32 = `SELECT toString(company_id) AS id FROM via_test.companies_large WHERE positionCaseInsensitive(name, '${s.replace(/'/g,"''")}') > 0 ORDER BY employee_count DESC LIMIT 1`
-  const byName = await execId(sqlG_64, sqlG_32); if (byName) return byName
+  const byName = await execId64(`positionCaseInsensitive(name, '${s.replace(/'/g,"''")}') > 0`); if (byName) return byName
   return null
 }
 
@@ -342,7 +344,7 @@ export async function fetchEgoBinary(id: string, limit=1500){
     }
 
     return { buf, meta: { nodes: metaNodes }, labels } as any;
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error fetching ego graph:', error);
     throw new Error(`Failed to fetch graph data: ${error.message}`);
   }
@@ -380,28 +382,25 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
     SELECT
       toString(a.neighbor_id) AS id,
       a.overlap_days AS w,
-      anyLast(p.name) AS name,
-      argMax(s.title, ifNull(s.end_date, today())) AS title
+      anyLast(p.name) AS name
     FROM agg a
     LEFT JOIN via_test.persons_large p ON p.person_id_64 = a.neighbor_id
-    LEFT JOIN via_test.stints_large s ON toUInt64(s.${use64 ? 'person_id_64' : 'person_id'}) = a.neighbor_id
     GROUP BY id, w
   `
   const executeNeighbors = async (personKey: string, minDays: number) => {
     let sql = buildOverlapSQL(personKey, true, minDays)
-    console.log('fetchEgoClientJSON: Executing SQL:', sql)
-    const url = `${BASE}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`
-    let res = await fetch(url, { headers: { ...authHeaders() } })
+    console.log('fetchEgoClientJSON: Executing SQL (POST):', sql)
+    let res = await execCH(sql)
     if (!res.ok) {
       // Try non-_64 variant
       sql = buildOverlapSQL(personKey, false, minDays)
-      console.log('fetchEgoClientJSON: Retrying with person_id (non _64):', sql)
-      res = await fetch(`${BASE}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
+      console.log('fetchEgoClientJSON: Retrying with person_id (non _64, POST):', sql)
+      res = await execCH(sql)
     }
     if (!res.ok) { const msg = await res.text().catch(()=>"" as any); throw new Error(`fetch failed ${res.status}: ${msg.slice(0,200)}`) }
     const text = await res.text()
     const lines = text.trim() ? text.trim().split('\n').filter(Boolean) : []
-    return lines.map(line => JSON.parse(line)) as Array<{id:number; w:number; name:string; title?: string}>
+    return lines.map(line => JSON.parse(line)) as Array<{id:number; w:number; name:string}>
   }
   
   // First-degree: >= 24 months (720 days)
@@ -424,14 +423,12 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
       LIMIT ${Math.min(limit, 600)}
     `
     let sql2 = buildCoworkersSQL(effectiveKey, true)
-    console.log('fetchEgoClientJSON: Fallback SQL (no time-overlap):', sql2)
-    let url2 = `${BASE}/?query=${encodeURIComponent(sql2)}&default_format=JSONEachRow`
-    let res2 = await fetch(url2, { headers: { ...authHeaders() } })
+    console.log('fetchEgoClientJSON: Fallback SQL (no time-overlap, POST):', sql2)
+    let res2 = await execCH(sql2)
     if (!res2.ok) {
       sql2 = buildCoworkersSQL(effectiveKey, false)
-      console.log('fetchEgoClientJSON: Fallback retry with person_id:', sql2)
-      url2 = `${BASE}/?query=${encodeURIComponent(sql2)}&default_format=JSONEachRow`
-      res2 = await fetch(url2, { headers: { ...authHeaders() } })
+      console.log('fetchEgoClientJSON: Fallback retry with person_id (POST):', sql2)
+      res2 = await execCH(sql2)
     }
     if (res2.ok) {
       const text2 = await res2.text()
@@ -446,18 +443,16 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
   let centerTitle: string | null = null
   try {
     const centerSQL = `
-      SELECT anyLast(p.name) AS name, argMax(s.title, ifNull(s.end_date, today())) AS title
+      SELECT anyLast(p.name) AS name
       FROM via_test.persons_large p
-      LEFT JOIN via_test.stints_large s ON s.person_id_64 = toUInt64(${effectiveKey})
       WHERE p.person_id_64 = toUInt64(${effectiveKey})
-      GROUP BY p.person_id_64
       LIMIT 1`
     const centerRes = await fetch(`${BASE}/?query=${encodeURIComponent(centerSQL)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
     const centerText = await centerRes.text()
     if (centerText.trim()) {
       const row = JSON.parse(centerText.trim().split('\n')[0])
       centerName = row?.name || 'Center'
-      centerTitle = row?.title || null
+      centerTitle = null
     }
   } catch {}
 
@@ -474,14 +469,14 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
         LIMIT 1
       )
       SELECT toString(id) AS id FROM cand`
-    const altRes = await fetch(`${BASE}/?query=${encodeURIComponent(altSql)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
+    const altRes = await execCH(altSql)
     const altTxt = await altRes.text(); const altRow = altTxt.trim().split('\n').filter(Boolean)[0]
     if (altRow) {
       const alt = JSON.parse(altRow).id as string
       if (alt && alt !== effectiveKey) {
         console.log('fetchEgoClientJSON: Using name-based surrogate id:', alt, 'for', centerName)
         effectiveKey = alt
-        neighbors = await executeNeighbors(effectiveKey)
+        neighbors = await executeNeighbors(effectiveKey, 720)
         if (neighbors.length === 0) {
           // also try relaxed on surrogate
           const sql2b = `
@@ -497,8 +492,7 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
             ORDER BY w DESC
             LIMIT ${Math.min(limit, 600)}
           `
-          const url2b = `${BASE}/?query=${encodeURIComponent(sql2b)}&default_format=JSONEachRow`
-          const r2b = await fetch(url2b, { headers: { ...authHeaders() } })
+          const r2b = await execCH(sql2b)
           if (r2b.ok) {
             const t2b = await r2b.text()
             const l2b = t2b.trim() ? t2b.trim().split('\n').filter(Boolean) : []
@@ -545,35 +539,33 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
         GROUP BY first_id, sec_id
         HAVING days >= ${Math.max(1, Math.floor(minDaysSecond))}
       ),
-      pairs AS (
-        SELECT argMax(first_id, days) AS first_id, sec_id, max(days) AS days
+      best AS (
+        SELECT first_id, sec_id, days
         FROM pairs_raw
-        GROUP BY sec_id
         ORDER BY days DESC
+        LIMIT 1 BY sec_id
         LIMIT ${Math.max(0, Math.min(secLimit, 1200))}
       )
-    SELECT toString(sec_id) AS id, days AS w, toString(first_id) AS first_id,
-           anyLast(p.name) AS name,
-           argMax(s.title, ifNull(s.end_date, today())) AS title
-    FROM pairs
-    LEFT JOIN via_test.persons_large p ON p.person_id_64 = sec_id
-    LEFT JOIN via_test.stints_large s ON s.person_id_64 = sec_id
+    SELECT toString(b.sec_id) AS id, b.days AS w, toString(b.first_id) AS first_id,
+           anyLast(p.name) AS name
+    FROM best b
+    LEFT JOIN via_test.persons_large p ON p.person_id_64 = b.sec_id
     GROUP BY id, w, first_id
   `
 
   const executeSecondNeighbors = async (personKey: string, minDaysFirst: number, minDaysSecond: number, secLimit: number) => {
     let sql = buildSecondDegreeSQL(personKey, true, minDaysFirst, minDaysSecond, secLimit)
-    console.log('fetchEgoClientJSON: Executing 2nd-degree SQL:', sql)
-    let res = await fetch(`${BASE}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
+    console.log('fetchEgoClientJSON: Executing 2nd-degree SQL (POST):', sql)
+    let res = await execCH(sql)
     if (!res.ok) {
       sql = buildSecondDegreeSQL(personKey, false, minDaysFirst, minDaysSecond, secLimit)
-      console.log('fetchEgoClientJSON: 2nd-degree retry with person_id:', sql)
-      res = await fetch(`${BASE}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`, { headers: { ...authHeaders() } })
+      console.log('fetchEgoClientJSON: 2nd-degree retry with person_id (POST):', sql)
+      res = await execCH(sql)
     }
-    if (!res.ok) return [] as Array<{ id:string; w:number; name:string; title?:string; first_id:string }>
+    if (!res.ok) return [] as Array<{ id:string; w:number; name:string; first_id:string }>
     const txt = await res.text()
     const lines = txt.trim() ? txt.trim().split('\n').filter(Boolean) : []
-    return lines.map(l=>JSON.parse(l)) as Array<{ id:string; w:number; name:string; title?:string; first_id:string }>
+    return lines.map(l=>JSON.parse(l)) as Array<{ id:string; w:number; name:string; first_id:string }>
   }
 
   // Build node list: center + first-degree + second-degree
@@ -639,9 +631,9 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
   // Labels and meta
   const labels = [centerName, ...firstList.map(n => n.name), ...secondList.map(n => n.name)]
   const metaNodes = [
-    { id: String(effectiveKey), name: centerName, full_name: centerName, title: centerTitle, group: 0, flags: 0 },
-    ...firstList.map((n:any) => ({ id: String(n.id), name: n.name, full_name: n.name, title: (n.title||null), group: 0, flags: 0 })),
-    ...secondList.map((n:any) => ({ id: String(n.id), name: n.name, full_name: n.name, title: (n.title||null), group: 0, flags: 0 }))
+    { id: String(effectiveKey), name: centerName, full_name: centerName, title: null, group: 0, flags: 0 },
+    ...firstList.map((n:any) => ({ id: String(n.id), name: n.name, full_name: n.name, title: null, group: 0, flags: 0 })),
+    ...secondList.map((n:any) => ({ id: String(n.id), name: n.name, full_name: n.name, title: null, group: 0, flags: 0 }))
   ]
 
   const tile = {
@@ -747,12 +739,11 @@ export async function fetchBridgesTileJSON(companyAId: string, companyBId: strin
   const nameA = rowA?.name || `Company ${a}`
   const nameB = rowB?.name || `Company ${b}`
 
-  // Build a balanced bridge score using overlap >= 24 months
-  // We restrict to candidates that touch S or T and compute NS/NT counts.
-  const buildSql = (use64: boolean, opts?: { currentOnly?: boolean, minDays?: number }) => {
-    const pid = use64 ? 'person_id_64' : 'person_id'
-    const currentOnly = opts?.currentOnly ?? true
-    const minDays = Math.max(1, Math.floor(opts?.minDays ?? 720))
+  // Build shared CTEs once; reuse across all subqueries
+  const buildCTE = (opts?: { currentOnly?: boolean, minDays?: number }) => {
+    const pid = 'person_id'
+    const currentOnly = opts?.currentOnly ?? false
+    const minDays = Math.max(1, Math.floor(opts?.minDays ?? 365))
     return `
     WITH
       S AS (
@@ -805,9 +796,13 @@ export async function fetchBridgesTileJSON(companyAId: string, companyBId: strin
         SELECT m, NS, NT, sqrt(toFloat64(NS) * toFloat64(NT)) AS score
         FROM combined
         WHERE NS > 0 AND NT > 0
-        ORDER BY score DESC
-        LIMIT ${Math.max(10, Math.min(500, limit))}
-      )
+      ORDER BY score DESC
+      LIMIT ${Math.max(10, Math.min(500, limit))}
+    )
+    `
+  }
+  const buildScoredSelect = (opts?: { currentOnly?: boolean, minDays?: number }) => `
+    ${buildCTE(opts)}
     SELECT toString(s.m) AS m,
            s.NS AS NS,
            s.NT AS NT,
@@ -816,94 +811,281 @@ export async function fetchBridgesTileJSON(companyAId: string, companyBId: strin
     FROM scored s
     LEFT JOIN via_test.persons_large p ON p.person_id_64 = toUInt64(s.m)
     GROUP BY m, NS, NT, score
-    ORDER BY score DESC
-    `
-  }
+    ORDER BY score DESC`
 
   // Execute with robust retries across transport variants
-  const execSql = async (sql: string) => {
-    const tryGet = () => fetch(`${base}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`, { headers: { ...authHeaders() }, mode: 'cors' })
-    const tryPostQuery = () => fetch(`${base}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`, { method:'POST', headers: { ...authHeaders(), 'Content-Type':'text/plain; charset=utf-8' }, mode:'cors' })
-    const tryPostBody = () => fetch(`${base}/?default_format=JSONEachRow`, { method:'POST', headers: { 'Content-Type':'text/plain; charset=utf-8', ...authHeaders() }, body: sql, mode:'cors' })
+  const execSql = async (sql: string) => fetch(`${base}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`, { headers: { ...authHeaders() }, mode: 'cors' })
 
-    const run = async (which: 'GET'|'POST_QUERY'|'POST_BODY') => {
-      if (which === 'GET') return tryGet()
-      if (which === 'POST_QUERY') return tryPostQuery()
-      return tryPostBody()
-    }
-
-    // If we already discovered a working method, use it first
-    if (PREFERRED_CH_METHOD) {
-      const r0 = await run(PREFERRED_CH_METHOD)
-      if (r0.ok) return r0
-    }
-
-    // Probe sequence
-    const rGet = await tryGet(); if (rGet.ok) { try { localStorage.setItem('CH_HTTP_METHOD','GET'); PREFERRED_CH_METHOD = 'GET' } catch {} ; return rGet }
-    const rPQ = await tryPostQuery(); if (rPQ.ok) { try { localStorage.setItem('CH_HTTP_METHOD','POST_QUERY'); PREFERRED_CH_METHOD = 'POST_QUERY' } catch {} ; return rPQ }
-    const rPB = await tryPostBody(); if (rPB.ok) { try { localStorage.setItem('CH_HTTP_METHOD','POST_BODY'); PREFERRED_CH_METHOD = 'POST_BODY' } catch {} ; return rPB }
-    return rPB
-  }
-
-  let res = await execSql(buildSql(true, { currentOnly: true, minDays: 720 }))
-  if (!res.ok) {
-    const errTxt = await res.text().catch(()=>'' as any)
-    const likelySchemaMismatch = /Unknown\s+identifier|cannot\s+be\s+resolved|Column\s+not\s+found/i.test(errTxt)
-    if (likelySchemaMismatch) {
-      res = await execSql(buildSql(false, { currentOnly: true, minDays: 720 }))
-    }
-  }
+  let res = await execSql(buildScoredSelect({ currentOnly: false, minDays: 365 }))
   if (!res.ok) { const t = await res.text().catch(()=>'' as any); throw new Error(`bridges query failed ${res.status}: ${t.slice(0,200)}`) }
   let txt = await res.text()
   let rows = txt.trim() ? txt.trim().split('\n').map(l=>JSON.parse(l)) : [] as Array<{ m:string, NS:number, NT:number, score:number, name?:string }>
+  // Drop weaker bridge candidates to reduce clutter
+  try {
+    const minDeg = 3 // require at least 3 total connections (NS+NT)
+    const minScore = 2.0
+    const filtered = rows.filter(r => (Number(r.NS||0) + Number(r.NT||0)) >= minDeg && Number(r.score||0) >= minScore)
+    if (filtered.length >= Math.min(60, Math.floor(rows.length*0.5))) rows = filtered
+  } catch {}
 
-  // Relaxed fallbacks when the strict query yields no candidates
-  if (rows.length === 0) {
-    // 1) Include anyone who ever worked there (drop current-only)
-    let res2 = await execSql(buildSql(true, { currentOnly: false, minDays: 720 }))
-    if (!res2.ok) res2 = await execSql(buildSql(false, { currentOnly: false, minDays: 720 }))
-    if (res2.ok) {
-      txt = await res2.text(); rows = txt.trim() ? txt.trim().split('\n').map(l=>JSON.parse(l)) : []
-    }
-  }
-  if (rows.length === 0) {
-    // 2) Lower overlap threshold to 365 days
-    let res3 = await execSql(buildSql(true, { currentOnly: false, minDays: 365 }))
-    if (!res3.ok) res3 = await execSql(buildSql(false, { currentOnly: false, minDays: 365 }))
-    if (res3.ok) {
-      txt = await res3.text(); rows = txt.trim() ? txt.trim().split('\n').map(l=>JSON.parse(l)) : []
-    }
-  }
+  // Fetch left (S) and right (T) member lists involved with scored bridges, capped at 100 each
+  const baseCTE = buildCTE({ currentOnly: false, minDays: 365 })
+  const sMembersSQL = `
+    ${baseCTE},
+    s_links AS (
+      SELECT if(u IN (SELECT id FROM S), u, v) AS s_id,
+             if(u IN (SELECT id FROM S), v, u) AS m,
+             days
+      FROM overlap_pairs
+      WHERE ((u IN (SELECT id FROM S) AND v IN (SELECT m FROM scored)) OR (v IN (SELECT id FROM S) AND u IN (SELECT m FROM scored)))
+    ),
+    s_members AS (
+      SELECT s_id AS id, count() AS c FROM s_links GROUP BY s_id ORDER BY c DESC LIMIT 100
+    )
+    SELECT toString(sm.id) AS id, anyLast(p.name) AS name
+    FROM s_members sm LEFT JOIN via_test.persons_large p ON p.person_id_64 = sm.id
+    GROUP BY sm.id
+  `
+  const tMembersSQL = `
+    ${baseCTE},
+    t_links AS (
+      SELECT if(u IN (SELECT id FROM T), u, v) AS t_id,
+             if(u IN (SELECT id FROM T), v, u) AS m,
+             days
+      FROM overlap_pairs
+      WHERE ((u IN (SELECT id FROM T) AND v IN (SELECT m FROM scored)) OR (v IN (SELECT id FROM T) AND u IN (SELECT m FROM scored)))
+    ),
+    t_members AS (
+      SELECT t_id AS id, count() AS c FROM t_links GROUP BY t_id ORDER BY c DESC LIMIT 100
+    )
+    SELECT toString(tm.id) AS id, anyLast(p.name) AS name
+    FROM t_members tm LEFT JOIN via_test.persons_large p ON p.person_id_64 = tm.id
+    GROUP BY tm.id
+  `
+  const sEdgesSQL = `
+    ${baseCTE},
+    s_links AS (
+      SELECT if(u IN (SELECT id FROM S), u, v) AS s_id,
+             if(u IN (SELECT id FROM S), v, u) AS m,
+             days
+      FROM overlap_pairs
+      WHERE ((u IN (SELECT id FROM S) AND v IN (SELECT m FROM scored)) OR (v IN (SELECT id FROM S) AND u IN (SELECT m FROM scored)))
+    ),
+    s_members AS (
+      SELECT s_id AS id, count() AS c FROM s_links GROUP BY s_id ORDER BY c DESC LIMIT 100
+    )
+    SELECT toString(s_id) AS sid, toString(m) AS m, days FROM s_links WHERE s_id IN (SELECT id FROM s_members)`
+  const tEdgesSQL = `
+    ${baseCTE},
+    t_links AS (
+      SELECT if(u IN (SELECT id FROM T), u, v) AS t_id,
+             if(u IN (SELECT id FROM T), v, u) AS m,
+             days
+      FROM overlap_pairs
+      WHERE ((u IN (SELECT id FROM T) AND v IN (SELECT m FROM scored)) OR (v IN (SELECT id FROM T) AND u IN (SELECT m FROM scored)))
+    ),
+    t_members AS (
+      SELECT t_id AS id, count() AS c FROM t_links GROUP BY t_id ORDER BY c DESC LIMIT 100
+    )
+    SELECT toString(t_id) AS tid, toString(m) AS m, days FROM t_links WHERE t_id IN (SELECT id FROM t_members)`
 
-  // Layout: left center, right center, middle grid of bridges
-  const count = 2 + rows.length
+  const bridgeEdgesSQL = `
+    ${baseCTE}
+    SELECT toString(least(u,v)) AS a,
+           toString(greatest(u,v)) AS b,
+           days
+    FROM overlap_pairs
+    WHERE u IN (SELECT m FROM scored) AND v IN (SELECT m FROM scored) AND u < v
+    ORDER BY days DESC
+    LIMIT 6000
+  `
+
+  const [sMemRes, tMemRes, sEdgeRes, tEdgeRes, bridgeEdgeRes] = await Promise.all([
+    execSql(sMembersSQL),
+    execSql(tMembersSQL),
+    execSql(sEdgesSQL),
+    execSql(tEdgesSQL),
+    execSql(bridgeEdgesSQL)
+  ])
+  const sMembers = sMemRes.ok ? (await sMemRes.text()).trim().split('\n').filter(Boolean).map(l=>JSON.parse(l)) as Array<{id:string,name?:string}> : []
+  const tMembers = tMemRes.ok ? (await tMemRes.text()).trim().split('\n').filter(Boolean).map(l=>JSON.parse(l)) as Array<{id:string,name?:string}> : []
+  const sEdges = sEdgeRes.ok ? (await sEdgeRes.text()).trim().split('\n').filter(Boolean).map(l=>JSON.parse(l)) as Array<{sid:string,m:string,days:number}> : []
+  const tEdges = tEdgeRes.ok ? (await tEdgeRes.text()).trim().split('\n').filter(Boolean).map(l=>JSON.parse(l)) as Array<{tid:string,m:string,days:number}> : []
+  const bridgeEdges = bridgeEdgeRes.ok ? (await bridgeEdgeRes.text()).trim().split('\n').filter(Boolean).map(l=>JSON.parse(l)) as Array<{a:string,b:string,days:number}> : []
+
+  // Layout: left line of S members, right line of T members, middle grid of bridges
+  const leftCount = sMembers.length
+  const rightCount = tMembers.length
+  const bridgeCount = rows.length
+  const count = leftCount + rightCount + bridgeCount
   const nodes: Array<[number,number]> = new Array(count)
   const edges: Array<[number,number,number]> = []
-  // centers
-  const leftX = -480, rightX = 480, centerY = 0
-  nodes[0] = [leftX, centerY]
-  nodes[1] = [rightX, centerY]
+  // Widen default width so columns sit further apart by default
+  // Push columns even farther apart for more separation
+  // Double the horizontal spread
+  const leftX = -5200
+  const rightX = 5200
+  const centerY = 0
+  // Place left line
+  // Loosen vertical stacking so side columns are not smooshed
+  const leftSpacing = 64
+  for (let i=0;i<leftCount;i++){
+    const jitter = (Math.random() - 0.5) * 36
+    nodes[i] = [leftX + jitter, (i - (leftCount-1)/2) * leftSpacing]
+  }
+  // Place right line
+  for (let i=0;i<rightCount;i++){
+    const jitter = (Math.random() - 0.5) * 36
+    const idx = leftCount + i
+    nodes[idx] = [rightX + jitter, (i - (rightCount-1)/2) * leftSpacing]
+  }
   // middle layout: jittered grid
-  const cols = Math.max(3, Math.ceil(Math.sqrt(rows.length)))
-  const spacing = 120
-  for (let i=0;i<rows.length;i++){
+  const cols = Math.max(3, Math.ceil(Math.sqrt(Math.max(1, bridgeCount))))
+  // Increase spacing and switch to a staggered hex-like layout so it feels less square
+  const spacing = 320
+  const vSpacing = Math.floor(spacing * 0.80)
+  for (let i=0;i<bridgeCount;i++){
     const r = rows[i]
     const c = i % cols
     const row = Math.floor(i / cols)
-    const x = (c - (cols-1)/2) * spacing + (Math.random()*2-1)*24
-    const y = (row - (Math.ceil(rows.length/cols)-1)/2) * spacing + (Math.random()*2-1)*24
-    nodes[2 + i] = [x, y]
-    edges.push([0, 2 + i, r.NS|0])
-    edges.push([1, 2 + i, r.NT|0])
+    // Stagger every other row by half a column to approximate a hex grid
+    const offset = (row % 2 === 1) ? spacing * 0.5 : 0
+    // Add organic warp to avoid squared look
+    const warpX = Math.sin(row * 0.9 + c * 0.4) * 40
+    const warpY = Math.cos(row * 0.7 + c * 0.3) * 28
+    const x = ((c - (cols-1)/2) * spacing + offset) + (Math.random()*2-1)*18 + warpX
+    const y = (row - (Math.ceil(rows.length/cols)-1)/2) * vSpacing + (Math.random()*2-1)*22 + warpY
+    nodes[leftCount + rightCount + i] = [x, y]
   }
 
-  const metaNodes = new Array(count).fill(0).map((_, i)=>{
-    if (i===0) return { id: String(a), name: nameA, full_name: nameA, title: null, group: 0, flags: 0 }
-    if (i===1) return { id: String(b), name: nameB, full_name: nameB, title: null, group: 0, flags: 0 }
-    const r = rows[i-2]
-    return { id: String(r?.m||i), name: String(r?.name||''), full_name: String(r?.name||''), title: null, group: 0, flags: 0 }
+  // Build maps for indices
+  const bridgeIndex = new Map<string, number>()
+  for (let i=0;i<bridgeCount;i++){ bridgeIndex.set(String(rows[i]?.m), leftCount + rightCount + i) }
+  const sIndex = new Map<string, number>(); for (let i=0;i<leftCount;i++){ sIndex.set(String(sMembers[i]?.id), i) }
+  const tIndex = new Map<string, number>(); for (let i=0;i<rightCount;i++){ tIndex.set(String(tMembers[i]?.id), leftCount + i) }
+
+  // Edges from S/T members to bridge candidates
+  for (const e of sEdges){ const si = sIndex.get(String(e.sid)); const bi = bridgeIndex.get(String(e.m)); if (si!=null && bi!=null){ edges.push([si, bi, Math.max(1, Math.round((e.days||0)/30))]) } }
+  for (const e of tEdges){ const ti = tIndex.get(String(e.tid)); const bi = bridgeIndex.get(String(e.m)); if (ti!=null && bi!=null){ edges.push([ti, bi, Math.max(1, Math.round((e.days||0)/30))]) } }
+  for (const e of bridgeEdges){
+    const ai = bridgeIndex.get(String(e.a))
+    const bi = bridgeIndex.get(String(e.b))
+    if (ai != null && bi != null && ai !== bi) {
+      const months = Math.max(1, Math.round((e.days || 0) / 30))
+      edges.push([ai, bi, months])
+    }
+  }
+
+  const metaNodes: Array<any> = new Array(count)
+  for (let i=0;i<leftCount;i++){
+    const m = sMembers[i]
+    metaNodes[i] = { id: String(m?.id||i), name: String(m?.name||''), full_name: String(m?.name||''), title: null, group: 0, flags: 0 }
+  }
+  for (let i=0;i<rightCount;i++){
+    const m = tMembers[i]
+    metaNodes[leftCount+i] = { id: String(m?.id||i), name: String(m?.name||''), full_name: String(m?.name||''), title: null, group: 2, flags: 0 }
+  }
+  for (let i=0;i<bridgeCount;i++){
+    const r = rows[i]
+    metaNodes[leftCount+rightCount+i] = {
+      id: String(r?.m||i),
+      name: String(r?.name||''),
+      full_name: String(r?.name||''),
+      title: null,
+      group: 1,
+      flags: 0,
+      score: r?.score ?? null,
+      left_degree: r?.NS ?? null,
+      right_degree: r?.NT ?? null
+    }
+  }
+
+  const labels = metaNodes.map((n, idx) => {
+    const base = String((n as any).name || (n as any).id || '')
+    if (idx < leftCount) return base || 'Left member'
+    if (idx < leftCount + rightCount) return base || 'Right member'
+    const meta = metaNodes[idx] as any
+    const score = typeof meta.score === 'number' ? ` • score ${meta.score.toFixed(1)}` : ''
+    return `${base || 'Bridge'}${score}`
   })
 
-  const labels = metaNodes.map(n=> String((n as any).name || (n as any).id || ''))
-  return { meta: { nodes: metaNodes }, coords: { nodes, edges }, labels }
+  const groups = new Array(count).fill(1)
+  for (let i=0;i<leftCount;i++) groups[i] = 0
+  for (let i=0;i<rightCount;i++) groups[leftCount + i] = 2
+
+  return { meta: { nodes: metaNodes }, coords: { nodes, edges, groups }, labels, focusWorld: { x: 0, y: centerY } }
 }
+
+
+export async function fetchMigrationPairs(companyAId: string, companyBId: string, opts?: { windowMonths?: number; since?: string; until?: string; limit?: number }){
+  const base = getApiBase()
+  if (!companyAId.startsWith('company:') || !companyBId.startsWith('company:')) {
+    throw new Error('migration requires company:<id> • company:<id>')
+  }
+  const a = companyAId.replace(/^company:/,'')
+  const b = companyBId.replace(/^company:/,'')
+  const limit = Math.max(10, Math.min(500, opts?.limit ?? 120))
+  const windowClauses: string[] = []
+  if (opts?.windowMonths && Number.isFinite(opts.windowMonths)) {
+    windowClauses.push(`start_date >= addMonths(today(), -${Number(opts.windowMonths)})`)
+  }
+  if (opts?.since) {
+    const since = opts.since.replace(/'/g, "''")
+    windowClauses.push(`start_date >= toDate('${since}')`)
+  }
+  if (opts?.until) {
+    const until = opts.until.replace(/'/g, "''")
+    windowClauses.push(`start_date <= toDate('${until}')`)
+  }
+  const windowFilter = windowClauses.length ? 'AND ' + windowClauses.join(' AND ') : ''
+  const sql = `
+    WITH
+      stints AS (
+        SELECT toUInt64(person_id) AS person_id,
+               toUInt64(company_id) AS company_id,
+               toDate(start_date) AS start_date,
+               toDate(ifNull(end_date, today())) AS end_date
+        FROM via_test.stints_large
+        WHERE company_id IN (toUInt64(${a}), toUInt64(${b}))
+          ${windowFilter}
+      ),
+      ordered AS (
+        SELECT *,
+               row_number() OVER (PARTITION BY person_id ORDER BY start_date, end_date) AS rn,
+               lead(company_id) OVER (PARTITION BY person_id ORDER BY start_date, end_date) AS next_company,
+               lead(start_date) OVER (PARTITION BY person_id ORDER BY start_date, end_date) AS next_start
+        FROM stints
+      ),
+      transitions AS (
+        SELECT person_id,
+               company_id AS from_company,
+               next_company AS to_company,
+               dateDiff('day', start_date, ifNull(next_start, end_date)) AS dwell_days
+        FROM ordered
+        WHERE next_company IS NOT NULL AND company_id <> next_company
+      )
+    SELECT
+      toString(from_company) AS from_id,
+      toString(to_company) AS to_id,
+      countDistinct(person_id) AS movers,
+      anyLast(c_from.name) AS from_name,
+      anyLast(c_to.name) AS to_name,
+      avg(dwell_days) AS avg_days
+    FROM transitions
+    LEFT JOIN via_test.companies_large c_from ON c_from.company_id_64 = from_company
+    LEFT JOIN via_test.companies_large c_to ON c_to.company_id_64 = to_company
+    GROUP BY from_id, to_id
+    ORDER BY movers DESC
+    LIMIT ${limit}
+  `
+  const res = await fetch(`${base}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`, { headers: { ...authHeaders() }, mode: 'cors' })
+  if (!res.ok) {
+    const txt = await res.text().catch(()=>'' as any)
+    throw new Error(`migration query failed ${res.status}: ${txt.slice(0,160)}`)
+  }
+  const body = await res.text()
+  const rows = body.trim() ? body.trim().split('
+').map(line => JSON.parse(line)) as Array<{ from_id:string; to_id:string; movers:number; from_name?:string; to_name?:string; avg_days?:number }> : []
+  return rows
+}
+
