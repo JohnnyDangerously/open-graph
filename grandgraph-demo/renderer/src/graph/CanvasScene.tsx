@@ -937,6 +937,12 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
     }
 
     const onKeyDown = (e: KeyboardEvent) => {
+      // Ignore keyboard shortcuts when user is typing in inputs/textareas/contenteditable
+      try {
+        const active = document.activeElement as HTMLElement | null
+        const isTyping = !!(active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || (active as any)?.isContentEditable))
+        if (isTyping) return
+      } catch {}
       if (e.key === '+' || e.key === '=') {
         setScale(s => Math.min(3.5, s * 1.1))
       } else if (e.key === '-') {
@@ -949,7 +955,7 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
         console.log('C key pressed - centering view')
         setTx(0)
         setTy(0)
-        setScale(100)
+        setScale(1)
       } else if (e.key === 'Escape') {
         if (props.onClear) props.onClear()
       }
@@ -971,7 +977,7 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
   }, [scale, tx, ty, nodes, tile, props])
 
   return (
-    <div style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
+    <div style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents:'none' }}>
       {/* Subtle dark overlay to reduce background noise (very low translucency) */}
       <div style={{ position:'absolute', inset:0, background:'rgba(5,7,12,0.65)', zIndex:0, pointerEvents:'none' }} />
       {/* Graph canvas layer */}
@@ -984,7 +990,8 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
           height: '100%', 
           display: 'block',
           cursor: draggingNodeRef.current ? 'grabbing' : 'grab',
-          zIndex: 1 // Above particle background
+          zIndex: 1, // Above particle background
+          pointerEvents:'auto'
         }} 
       />
     </div>
@@ -992,3 +999,5 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
 })
 
 export default CanvasScene
+
+

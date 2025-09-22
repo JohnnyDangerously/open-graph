@@ -3,6 +3,7 @@ import CanvasScene from "./graph/CanvasScene";
 import CommandBar from "./ui/CommandBar";
 import HUD from "./ui/HUD";
 import CompanyContacts from "./ui/CompanyContacts";
+import NaturalLanguage from "./ui/NaturalLanguage";
 import Settings from "./ui/Settings";
 import Sidebar from "./ui/Sidebar";
 import { setApiConfig } from "./lib/api";
@@ -36,6 +37,7 @@ export default function App(){
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [concentric, setConcentric] = useState(false);
   const [showContacts, setShowContacts] = useState(false);
+  const [showNLQ, setShowNLQ] = useState(false);
   // demo state removed
   const [spawnDir, setSpawnDir] = useState(0) // 0:N,1:E,2:S,3:W
   const [selectedRegion, setSelectedRegion] = useState<null | 'left' | 'right' | 'overlap'>(null)
@@ -567,9 +569,15 @@ export default function App(){
       {/* Top-left nav for panels */}
       <div style={{ position:'absolute', top:12, left:12, zIndex:16, display:'flex', gap:8 }}>
         <button onClick={()=> setShowContacts(s=>!s)} style={{ padding:'8px 10px', borderRadius:10, background: showContacts? '#4f7cff' : 'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.15)' }}>Company Contacts</button>
+        <button onClick={()=> setShowNLQ(s=>!s)} style={{ padding:'8px 10px', borderRadius:10, background: showNLQ? '#4f7cff' : 'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.15)' }}>Ask (NLQ)</button>
       </div>
       {showContacts && (
         <CompanyContacts />
+      )}
+      {showNLQ && (
+        <div style={{ position:'absolute', top:56, left:12, right:12, bottom:12, zIndex:12, overflow:'auto', background:'rgba(0,0,0,0.28)', border:'1px solid rgba(255,255,255,0.15)', borderRadius:12 }}>
+          <NaturalLanguage />
+        </div>
       )}
       {/* demo buttons removed */}
       {err && (

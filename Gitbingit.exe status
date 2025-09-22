@@ -1,0 +1,20 @@
+[1mdiff --git a/grandgraph-demo/renderer/src/App.tsx b/grandgraph-demo/renderer/src/App.tsx[m
+[1mindex 0f816d6..aadf677 100644[m
+[1m--- a/grandgraph-demo/renderer/src/App.tsx[m
+[1m+++ b/grandgraph-demo/renderer/src/App.tsx[m
+[36m@@ -4,6 +4,7 @@[m [mimport CommandBar from "./ui/CommandBar";[m
+ import HUD from "./ui/HUD";[m
+ import Settings from "./ui/Settings";[m
+ import Sidebar from "./ui/Sidebar";[m
+[32m+[m[32mimport AgentProbe from "./ui/AgentProbe";[m
+ import { setApiConfig } from "./lib/api";[m
+ import { resolveSmart, loadTileSmart } from "./smart";[m
+ // demo modules removed[m
+[36m@@ -560,6 +561,7 @@[m [mexport default function App(){[m
+         {jobFilter && <button onClick={()=> setJobFilter(null)} style={{ padding:'6px 10px', borderRadius:8, background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.2)' }}>Clear</button>}[m
+       </div>[m
+       <CommandBar onRun={run} />[m
+[32m+[m[32m      <AgentProbe />[m
+       <HUD focus={focus} nodes={nodeCount} fps={fps} selectedIndex={selectedIndex} concentric={concentric} onToggleConcentric={()=>setConcentric(c=>!c)} onSettings={()=>setShowSettings(true)} onBack={()=>{ if(cursor>0 && history[cursor]){ const cur=history[cursor]; const prev=history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); run(prev.id, { pushHistory:false, overrideMove:{ x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) } }} onForward={()=>{ if(cursor<history.length-1){ const next=history[cursor+1]; setCursor(cursor+1); if (next?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: next.turn||0 } })); run(next.id, { pushHistory:false, overrideMove:{ x: next?.move?.x||0, y: next?.move?.y||0 } }) } }} canBack={cursor>0} canForward={cursor<history.length-1} />[m
+       {/* demo buttons removed */}[m
+       {err && ([m
