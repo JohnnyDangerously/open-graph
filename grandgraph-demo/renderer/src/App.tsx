@@ -3,6 +3,8 @@ import CanvasScene from "./graph/CanvasScene";
 import CosmoScene from "./graph/CosmoScene";
 import CommandBar from "./ui/CommandBar";
 import HUD from "./ui/HUD";
+import CompanyContacts from "./ui/CompanyContacts";
+import NaturalLanguage from "./ui/NaturalLanguage";
 import Settings from "./ui/Settings";
 import Sidebar from "./ui/Sidebar";
 import { setApiConfig, fetchBridgesTileJSON } from "./lib/api";
@@ -40,6 +42,8 @@ export default function App(){
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [concentric, setConcentric] = useState(false);
+  const [showContacts, setShowContacts] = useState(false);
+  const [showNLQ, setShowNLQ] = useState(false);
   // demo state removed
   const [spawnDir, setSpawnDir] = useState(0) // 0:N,1:E,2:S,3:W
   const [selectedRegion, setSelectedRegion] = useState<null | 'left' | 'right' | 'overlap'>(null)
@@ -76,7 +80,12 @@ export default function App(){
 
   // demo triples removed
 
-  async function run(cmd: string, opts?: { pushHistory?: boolean, overrideMove?: { x:number, y:number }, turnRadians?: number }){
+  async function run(expression: string, evaluation: EvaluationResult | null) {
+    // For now, ignore the evaluation and just run the expression as a command
+    await runCommand(expression);
+  }
+
+  async function runCommand(cmd: string, opts?: { pushHistory?: boolean, overrideMove?: { x:number, y:number }, turnRadians?: number }){
     const pushHistory = opts?.pushHistory !== false;
     const s = cmd.trim();
     if (!s) return;
@@ -158,7 +167,7 @@ export default function App(){
     if (/^suggest\s+best\s+compare$/i.test(s)){
       try {
         const best = await suggestBestPair()
-        if (best) { await run(`compare ${best.a} + ${best.b}`); return }
+        if (best) { await run(`compare ${best.a} + ${best.b}`, null); return }
         setErr('No suitable pair found in a quick scan.')
       } catch (e:any) { setErr(e?.message || 'suggest failed') }
       return
@@ -716,7 +725,7 @@ export default function App(){
         const sel = metaNodes?.[selectedIndex]
         if (!sel || sel.id == null) return
         const id = String(sel.id)
-        run(`show person:${id}`)
+          runCommand(`show person:${id}`)
         const radians = (Math.random() > 0.5 ? 1 : -1) * (Math.PI/2)
         window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians } }))
         return
@@ -732,7 +741,7 @@ export default function App(){
           setCursor(cursor-1)
           // reverse camera motion: use negative of the move we took to reach current
           if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } }))
-          run(prev.id, { pushHistory: false, overrideMove: { x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } })
+          runCommand(prev.id, { pushHistory: false, overrideMove: { x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } })
         }
         return
       }
@@ -745,12 +754,12 @@ export default function App(){
       if (e.metaKey && (e.key === '[' || e.key === 'BracketLeft')) {
         e.preventDefault()
         const promoted = (sceneRef.current as any)?.promoteTrailPrevious?.() || false
-        if (!promoted && cursor > 0 && history[cursor]) { const cur = history[cursor]; const prev = history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); run(prev.id, { pushHistory:false, overrideMove: { x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) }
+        if (!promoted && cursor > 0 && history[cursor]) { const cur = history[cursor]; const prev = history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); runCommand(prev.id, { pushHistory:false, overrideMove: { x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) }
         return
       }
       if (e.metaKey && (e.key === ']' || e.key === 'BracketRight')) {
         e.preventDefault()
-        if (cursor < history.length-1) { const next = history[cursor+1]; setCursor(cursor+1); if (next?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: next.turn||0 } })); run(next.id, { pushHistory:false, overrideMove:{ x: next?.move?.x||0, y: next?.move?.y||0 } }) }
+        if (cursor < history.length-1) { const next = history[cursor+1]; setCursor(cursor+1); if (next?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: next.turn||0 } })); runCommand(next.id, { pushHistory:false, overrideMove:{ x: next?.move?.x||0, y: next?.move?.y||0 } }) }
         return
       }
     }
@@ -811,14 +820,27 @@ export default function App(){
         selectedIndex={selectedIndex}
         nodes={nodeCount}
         fps={fps}
-        onBack={()=>{ if(cursor>0 && history[cursor]){ const cur=history[cursor]; const prev=history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); run(prev.id, { pushHistory:false, overrideMove:{ x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) } }}
-        onForward={()=>{ if(cursor<history.length-1){ const next=history[cursor+1]; setCursor(cursor+1); if (next?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: next.turn||0 } })); run(next.id, { pushHistory:false, overrideMove:{ x: next?.move?.x||0, y: next?.move?.y||0 } }) } }}
+        onBack={()=>{ if(cursor>0 && history[cursor]){ const cur=history[cursor]; const prev=history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); runCommand(prev.id, { pushHistory:false, overrideMove:{ x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) } }}
+        onForward={()=>{ if(cursor<history.length-1){ const next=history[cursor+1]; setCursor(cursor+1); if (next?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: next.turn||0 } })); runCommand(next.id, { pushHistory:false, overrideMove:{ x: next?.move?.x||0, y: next?.move?.y||0 } }) } }}
         canBack={cursor>0}
         canForward={cursor<history.length-1}
         onReshape={(mode)=>{ (sceneRef.current as any)?.reshapeLayout?.(mode, { animate:true, ms:520 }) }}
         onSettings={()=>setShowSettings(true)}
       />
       {/* HUD is now replaced by inline controls within CommandBar */}
+      {/* Top-left nav for panels */}
+      <div style={{ position:'absolute', top:12, left:12, zIndex:16, display:'flex', gap:8 }}>
+        <button onClick={()=> setShowContacts(s=>!s)} style={{ padding:'8px 10px', borderRadius:10, background: showContacts? '#4f7cff' : 'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.15)' }}>Company Contacts</button>
+        <button onClick={()=> setShowNLQ(s=>!s)} style={{ padding:'8px 10px', borderRadius:10, background: showNLQ? '#4f7cff' : 'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.15)' }}>Ask (NLQ)</button>
+      </div>
+      {showContacts && (
+        <CompanyContacts />
+      )}
+      {showNLQ && (
+        <div style={{ position:'absolute', top:56, left:12, right:12, bottom:12, zIndex:12, overflow:'auto', background:'rgba(0,0,0,0.28)', border:'1px solid rgba(255,255,255,0.15)', borderRadius:12 }}>
+          <NaturalLanguage />
+        </div>
+      )}
       {/* demo buttons removed */}
       {err && (
         <div style={{ position:'absolute', top:52, left:12, right:12, padding:'10px 12px', background:'rgba(200,40,60,0.2)', border:'1px solid rgba(255,80,100,0.35)', color:'#ffbfc9', borderRadius:10, zIndex:11 }}>
