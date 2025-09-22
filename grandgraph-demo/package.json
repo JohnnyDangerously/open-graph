@@ -2,22 +2,26 @@
   "name": "grandgraph-demo",
   "private": true,
   "scripts": {
-    "dev": "concurrently -k \"vite --config renderer/vite.config.ts --port 5174\" \"cross-env ELECTRON_START_URL=http://127.0.0.1:5174 electron electron/main.js\"",
+    "dev": "concurrently -k \"vite --config renderer/vite.config.ts --port 5174\" \"env -u ELECTRON_RUN_AS_NODE ELECTRON_START_URL=http://127.0.0.1:5174 electron electron/main.js\"",
     "build:renderer": "vite build --config renderer/vite.config.ts",
-    "build": "npm run build:renderer && electron electron/main.js --build",
-    "start": "electron electron/main.js"
+    "build": "npm run build:renderer && env -u ELECTRON_RUN_AS_NODE electron electron/main.js --build",
+    "start": "env -u ELECTRON_RUN_AS_NODE electron electron/main.js"
   },
   "devDependencies": {
     "@types/node": "^20",
+    "@types/react": "19.1.13",
+    "@types/react-dom": "19.1.9",
     "@vitejs/plugin-react": "^4",
     "concurrently": "^8",
-    "electron": "^31",
     "ts-node": "^10",
     "typescript": "^5",
     "vite": "^5"
   },
   "dependencies": {
-    "cross-env": "^10.0.0",
+    "@cosmograph/react": "^1.4.2",
+    "d3": "7.9.0",
+    "electron": "^38.1.2",
+    "framer-motion": "12.23.16",
     "react": "^18",
     "react-dom": "^18",
     "regl": "^2"

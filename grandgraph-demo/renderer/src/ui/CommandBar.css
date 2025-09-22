@@ -1,0 +1,379 @@
+.crux-shell {
+  position: absolute;
+  left: 50%;
+  bottom: 64px;
+  transform: translateX(-50%);
+  width: min(1040px, calc(100% - 120px));
+  color: #fff;
+  font-family: "Inter", system-ui, sans-serif;
+  display: grid;
+  gap: 12px;
+  z-index: 30;
+}
+
+.crux-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.crux-focus-card {
+  flex: 1;
+  min-width: 200px;
+  background: rgba(14, 18, 44, 0.72);
+  border: 1px solid rgba(138, 153, 255, 0.22);
+  border-radius: 14px;
+  padding: 10px 14px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(18px);
+}
+
+.crux-focus-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  opacity: 0.6;
+}
+
+.crux-focus-body {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.crux-focus-foot {
+  font-size: 12px;
+  opacity: 0.7;
+  margin-top: 4px;
+}
+
+.crux-stats {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 12px;
+  background: rgba(20, 28, 64, 0.64);
+  border: 1px solid rgba(138, 153, 255, 0.16);
+}
+
+.crux-nav {
+  display: flex;
+  gap: 6px;
+}
+
+.crux-nav-btn {
+  font-size: 12px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.crux-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.crux-input-wrap {
+  position: relative;
+  background: rgba(12, 15, 34, 0.85);
+  border: 1px solid rgba(121, 135, 255, 0.22);
+  border-radius: 16px;
+  padding: 16px 18px 18px;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(18px);
+}
+
+.crux-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 26px;
+  margin-bottom: 12px;
+}
+
+.crux-chip {
+  padding: 4px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  letter-spacing: 0.01em;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.crux-chip-entity {
+  background: linear-gradient(135deg, rgba(122, 200, 255, 0.28), rgba(98, 160, 255, 0.24));
+  border-color: rgba(140, 188, 255, 0.32);
+}
+
+.crux-chip-operator {
+  background: rgba(255, 195, 130, 0.22);
+  border-color: rgba(255, 195, 130, 0.32);
+}
+
+.crux-chip-filter {
+  background: rgba(108, 255, 190, 0.18);
+  border-color: rgba(108, 255, 190, 0.26);
+}
+
+.crux-chip-view {
+  background: rgba(190, 160, 255, 0.22);
+  border-color: rgba(190, 160, 255, 0.33);
+}
+
+.crux-chip-pipe {
+  background: rgba(255, 255, 255, 0.10);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.crux-input {
+  width: 100%;
+  resize: none;
+  background: transparent;
+  color: #f6f7ff;
+  border: none;
+  font-size: 16px;
+  line-height: 1.4;
+  outline: none;
+  font-family: "Inter", system-ui, sans-serif;
+}
+
+.crux-input::placeholder {
+  color: rgba(200, 210, 255, 0.32);
+}
+
+.crux-input-loading {
+  background-image: linear-gradient(90deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.15) 50%, rgba(255,255,255,0.05) 100%);
+  background-size: 220% 100%;
+  animation: crux-loading 1.6s ease infinite;
+}
+
+@keyframes crux-loading {
+  0% { background-position: 200% 0; }
+  100% { background-position: -20% 0; }
+}
+
+.crux-ghost-count {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  font-size: 12px;
+  color: rgba(170, 190, 255, 0.66);
+}
+
+.crux-suggestions {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  top: 100%;
+  margin-top: 10px;
+  display: grid;
+  gap: 6px;
+  background: rgba(12, 15, 34, 0.94);
+  border: 1px solid rgba(140, 160, 255, 0.24);
+  border-radius: 14px;
+  padding: 10px;
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(14px);
+}
+
+.crux-suggestion {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.crux-suggestion:hover,
+.crux-suggestion.is-active {
+  background: rgba(105, 140, 255, 0.22);
+}
+
+.crux-suggestion-value {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.crux-suggestion-desc {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.crux-preview {
+  background: rgba(10, 14, 36, 0.9);
+  border: 1px solid rgba(132, 150, 255, 0.18);
+  border-radius: 16px;
+  padding: 14px 18px 18px;
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(18px);
+}
+
+.crux-preview-empty {
+  font-size: 13px;
+  opacity: 0.7;
+}
+
+.crux-preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.crux-preview-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.82;
+}
+
+.crux-preview-meta {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.crux-preview-body {
+  display: block;
+}
+
+.crux-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.crux-card {
+  background: rgba(24, 30, 68, 0.72);
+  border: 1px solid rgba(136, 152, 255, 0.2);
+  border-radius: 12px;
+  padding: 12px;
+  display: grid;
+  gap: 6px;
+}
+
+.crux-card-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.crux-card-sub {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.crux-card-meta {
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.crux-list {
+  display: grid;
+  gap: 8px;
+}
+
+.crux-list-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  background: rgba(22, 28, 60, 0.72);
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+
+.crux-preview-warnings {
+  margin-top: 12px;
+  font-size: 12px;
+  color: rgba(255, 200, 150, 0.9);
+}
+
+.crux-warning-toggle {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  font-size: 12px;
+  text-decoration: underline;
+}
+
+.crux-preview-warnings ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.crux-spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid rgba(140, 160, 255, 0.2);
+  border-top-color: rgba(140, 160, 255, 0.9);
+  border-radius: 50%;
+  animation: crux-spin 1s linear infinite;
+}
+
+@keyframes crux-spin {
+  to { transform: rotate(360deg); }
+}
+
+.crux-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.crux-example-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.crux-pill {
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(140, 160, 255, 0.3);
+  background: rgba(140, 160, 255, 0.12);
+  color: #f6f7ff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.crux-layout-switch {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  background: rgba(20, 24, 54, 0.72);
+  border: 1px solid rgba(138, 153, 255, 0.18);
+  border-radius: 12px;
+  padding: 6px 10px;
+}
+
+.crux-layout-switch span {
+  font-size: 11px;
+  opacity: 0.7;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.crux-layout-switch button,
+.crux-settings {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 12px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.crux-settings {
+  align-self: flex-end;
+}

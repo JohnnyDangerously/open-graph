@@ -31,7 +31,7 @@ export async function resolveSmart(q: string): Promise<string | null> {
 }
 
 export async function loadTileSmart(key: string) {
-  // Company: go straight to JSON builder. Person: prefer binary first.
+  // Company: go straight to JSON builder. Person: prefer JSON first (richer 1st/2nd-degree), then binary fallback.
   if (key.startsWith('company:')) {
     const j = await fetchCompanyEgoJSON(key, 1500)
     const tile = parseJsonTile(j)
@@ -45,20 +45,7 @@ export async function loadTileSmart(key: string) {
     }
     return { tile }
   }
-  // Person flow
-  try {
-    console.log('loadTileSmart: trying fetchEgoBinary for key:', key)
-    const b = await fetchEgoBinary(key, 1500) as any
-    if (b && b.buf) {
-      const tile = parseTile(b.buf)
-      if (b.labels && Array.isArray(b.labels)) (tile as any).labels = b.labels
-      if (b.meta && b.meta.nodes) (tile as any).meta = { nodes: b.meta.nodes }
-      console.log('loadTileSmart: Parsed binary tile:', { count: tile.count, edges: tile.edges?.length })
-      return { tile }
-    }
-  } catch (e) {
-    console.warn('loadTileSmart: binary path failed, trying JSON:', e)
-  }
+  // Person flow — JSON first for real 1st/2nd-degree graph
   try {
     const j = await fetchEgoClientJSON(key, 1500)
     const tile = parseJsonTile(j)
@@ -72,7 +59,20 @@ export async function loadTileSmart(key: string) {
     }
     return { tile }
   } catch (error) {
-    console.error('loadTileSmart: both paths failed:', error)
+    console.warn('loadTileSmart: JSON path failed, trying binary:', error)
+  }
+  try {
+    console.log('loadTileSmart: trying fetchEgoBinary for key:', key)
+    const b = await fetchEgoBinary(key, 1500) as any
+    if (b && b.buf) {
+      const tile = parseTile(b.buf)
+      if (b.labels && Array.isArray(b.labels)) (tile as any).labels = b.labels
+      if (b.meta && b.meta.nodes) (tile as any).meta = { nodes: b.meta.nodes }
+      console.log('loadTileSmart: Parsed binary tile:', { count: tile.count, edges: tile.edges?.length })
+      return { tile }
+    }
+  } catch (e) {
+    console.error('loadTileSmart: binary path failed as well:', e)
   }
   // Fallback to cache
   const c = await cacheTile(key)

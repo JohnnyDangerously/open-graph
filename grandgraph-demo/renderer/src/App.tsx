@@ -1,22 +1,25 @@
-import React, { useRef, useState, useEffect } from "react";
+import React, { useRef, useState, useEffect, useMemo } from "react";
 import CanvasScene from "./graph/CanvasScene";
+import CosmoScene from "./graph/CosmoScene";
 import CommandBar from "./ui/CommandBar";
 import HUD from "./ui/HUD";
-import CompanyContacts from "./ui/CompanyContacts";
-import NaturalLanguage from "./ui/NaturalLanguage";
 import Settings from "./ui/Settings";
 import Sidebar from "./ui/Sidebar";
-import { setApiConfig } from "./lib/api";
+import { setApiConfig, fetchBridgesTileJSON } from "./lib/api";
 import { resolveSmart, loadTileSmart } from "./smart";
 // demo modules removed
 import type { ParsedTile } from "./graph/parse";
+import { parseJsonTile } from "./graph/parse";
+import type { GraphSceneHandle } from "./graph/types";
+import type { EvaluationResult, HistoryEntry as CommandHistoryEntry, Token as CruxToken, OperatorToken as CruxOperatorToken } from "./crux/types";
 
-type SceneRef = { setForeground: (fg: any, opts?: { noTrailSnapshot?: boolean }) => void; clear: () => void, promoteTrailPrevious?: ()=>boolean };
+type SceneRef = GraphSceneHandle;
 
 export default function App(){
   const [focus, setFocus] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const sceneRef = useRef<SceneRef | null>(null);
+  const latestTileRef = useRef<ParsedTile | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [fps, setFps] = useState(60);
   const [nodeCount, setNodeCount] = useState(0);
@@ -24,26 +27,50 @@ export default function App(){
   const [metaNodes, setMetaNodes] = useState<Array<{ id?: string|number, title?: string|null }>>([]);
   const [jobFilter, setJobFilter] = useState<string | null>(null)
   const [avatars, setAvatars] = useState<string[]>([]);
-  const [history, setHistory] = useState<Array<{ id: string, move?: { x:number, y:number }, turn?: number }>>([]);
+  const [history, setHistory] = useState<Array<{ id: string, move?: { x:number, y:number }, turn?: number, at?: number }>>([]);
+  const [commandHistory, setCommandHistory] = useState<CommandHistoryEntry[]>([]);
   const [cursor, setCursor] = useState(-1);
   // filters removed
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [apiBase, setApiBase] = useState<string>(()=>{
-    try { return localStorage.getItem('API_BASE_URL') || "http://localhost:8123" } catch { return "http://localhost:8123" }
+    try { return localStorage.getItem('API_BASE') || "http://34.192.99.41" } catch { return "http://34.192.99.41" }
   });
   const [bearer, setBearer] = useState<string>(()=>{
     try { return localStorage.getItem('API_BEARER') || "" } catch { return "" }
   });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [concentric, setConcentric] = useState(false);
-  const [showContacts, setShowContacts] = useState(false);
-  const [showNLQ, setShowNLQ] = useState(false);
   // demo state removed
   const [spawnDir, setSpawnDir] = useState(0) // 0:N,1:E,2:S,3:W
   const [selectedRegion, setSelectedRegion] = useState<null | 'left' | 'right' | 'overlap'>(null)
   const [sidebarIndices, setSidebarIndices] = useState<number[] | null>(null)
   const [compareGroups, setCompareGroups] = useState<null | { left:number[], right:number[], overlap:number[] }>(null)
   const lastCompareIdsRef = useRef<{ a:string, b:string } | null>(null)
+  const [rendererMode, setRendererMode] = useState<'canvas' | 'cosmograph'>('canvas')
+
+  const handleSceneRef = (instance: SceneRef | null) => {
+    sceneRef.current = instance
+  }
+
+  useEffect(() => {
+    if (sceneRef.current && latestTileRef.current) {
+      try {
+        sceneRef.current.setForeground(latestTileRef.current, { noTrailSnapshot: true })
+      } catch (e) {
+        console.warn('Failed to reapply tile on renderer swap', e)
+      }
+    }
+  }, [rendererMode])
+
+  const visibleMask = useMemo(() => {
+    if (!metaNodes || jobFilter === null || jobFilter.trim() === '') return null
+    const q = jobFilter.toLowerCase()
+    return metaNodes.map((m, idx) => {
+      if (idx === 0) return true
+      const title = (m?.title || '').toLowerCase()
+      return title.includes(q)
+    })
+  }, [metaNodes, jobFilter])
 
   // demo resize removed
 
@@ -63,10 +90,78 @@ export default function App(){
       try { (sceneRef.current as any)?.focusIndex?.(0, { animate:true, ms:420, zoom: 2.0 }) } catch {}
       return
     }
+    // Bridges mode: "bridges <companyA> + <companyB>"
+    if (/^bridges\b/i.test(s)) {
+      const raw = s.replace(/^bridges\s*/i, '')
+      const parts = raw.split('+').map(t => t.trim()).filter(Boolean)
+      if (parts.length !== 2) { setErr('Bridges expects two companies, e.g. "bridges Acme + Globex"'); return }
+      const [aIn, bIn] = parts
+      const [aId, bId] = await Promise.all([resolveSmart(aIn), resolveSmart(bIn)])
+      if (!aId || !bId || !aId.startsWith('company:') || !bId.startsWith('company:')) { setErr('Both sides must resolve to company:<id>. Try exact names or a domain.'); return }
+      try {
+        setErr(null)
+        setFocus(`${aId} bridges ${bId}`)
+        const j = await fetchBridgesTileJSON(aId, bId, 180)
+        // Decorate labels for bridges: append score/degree if provided
+        const decorateLabels = (labelsIn: string[], payload: any): string[] => {
+          try {
+            const meta = Array.isArray(payload?.meta?.nodes) ? payload.meta.nodes : []
+            const groups = Array.isArray(payload?.coords?.groups) ? payload.coords.groups : []
+            if (!Array.isArray(labelsIn)) return []
+            return labelsIn.map((lab, i) => {
+              const g = typeof groups[i] === 'number' ? groups[i] : (typeof meta?.[i]?.group === 'number' ? meta[i].group : undefined)
+              if (g === 1) {
+                const sc = meta?.[i]?.score
+                const deg = meta?.[i]?.degree
+                const scorePart = (typeof sc === 'number') ? ` • score ${Number(sc).toFixed(2)}` : ''
+                const degPart = (typeof deg === 'number') ? ` • deg ${deg}` : ''
+                return `${lab || ''}${scorePart}${degPart}`.trim()
+              }
+              return lab
+            })
+          } catch { return labelsIn }
+        }
+        const tile = parseJsonTile(j as any)
+        try {
+          const labelsIn = (j as any).labels as string[] | undefined
+          if (labelsIn) setLabels(decorateLabels(labelsIn, j))
+        } catch {}
+        try {
+          const meta = (j as any)?.meta?.nodes as any[] | undefined
+          const labelsLocal = (j as any).labels as string[] | undefined
+          const av = new Array(tile.count).fill('').map((_, i)=>{
+            const m = meta?.[i]
+            const li = (m && typeof m.linkedin === 'string') ? m.linkedin as string : undefined
+            if (li) {
+              const url = /^https?:\/\//i.test(li) ? li : `https://www.linkedin.com/in/${String(li).replace(/^\/*in\//,'')}`
+              return `https://unavatar.io/${encodeURIComponent(url)}?fallback=false`
+            }
+            const lab = labelsLocal?.[i] || `#${i}`
+            const seed = encodeURIComponent(lab)
+            return `https://api.dicebear.com/7.x/thumbs/svg?seed=${seed}`
+          })
+          setAvatars(av)
+        } catch {}
+        latestTileRef.current = tile as ParsedTile
+        sceneRef.current?.setForeground(tile as any)
+        return
+      } catch (e:any) {
+        setErr(e?.message || 'bridges failed')
+        return
+      }
+    }
     // Compare mode: "<a> + <b>" or "compare <a> + <b>"
     if (/\+/.test(s)) {
       await runCompare(s);
       return;
+    }
+    if (/^suggest\s+best\s+compare$/i.test(s)){
+      try {
+        const best = await suggestBestPair()
+        if (best) { await run(`compare ${best.a} + ${best.b}`); return }
+        setErr('No suitable pair found in a quick scan.')
+      } catch (e:any) { setErr(e?.message || 'suggest failed') }
+      return
     }
     const m = /^show\s+(.+)$/.exec(s);
     let id = (m ? m[1] : s).trim();
@@ -83,13 +178,18 @@ export default function App(){
       try { if ((tile as any).labels && Array.isArray((tile as any).labels)) setLabels((tile as any).labels as string[]) } catch {}
       // Derive avatar urls if meta available; fallback to dicebear from label
       try {
-        const metaNodes: Array<{ avatar_url?: string, avatarUrl?: string, name?: string, full_name?: string, id?: string|number }> | undefined = (tile as any).meta?.nodes
+        const metaNodes: Array<{ avatar_url?: string, avatarUrl?: string, name?: string, full_name?: string, id?: string|number, linkedin?: string }> | undefined = (tile as any).meta?.nodes
         if (Array.isArray(metaNodes)) setMetaNodes(metaNodes as any)
         const av = new Array(tile.count).fill('').map((_, i)=>{
           const m = metaNodes?.[i]
           const url = (m?.avatar_url || m?.avatarUrl) as string | undefined
-          const label = (m?.full_name || m?.name || (tile as any).labels?.[i]) as string | undefined
           if (url && typeof url === 'string') return url
+          const li = (m?.linkedin && typeof m.linkedin === 'string') ? m.linkedin : undefined
+          if (li) {
+            const full = /^https?:\/\//i.test(li) ? li : `https://www.linkedin.com/in/${String(li).replace(/^\/*in\//,'')}`
+            return `https://unavatar.io/${encodeURIComponent(full)}?fallback=false`
+          }
+          const label = (m?.full_name || m?.name || (tile as any).labels?.[i]) as string | undefined
           const seed = encodeURIComponent(label || String(m?.id || i))
           return `https://api.dicebear.com/7.x/thumbs/svg?seed=${seed}`
         })
@@ -117,6 +217,7 @@ export default function App(){
       } catch (e) { console.warn('spawn offset failed', e) }
 
       try {
+        latestTileRef.current = tile as ParsedTile
         sceneRef.current?.setForeground(tile as any);
       } catch (e) {
         console.error('App: setForeground failed:', e)
@@ -131,6 +232,39 @@ export default function App(){
       setErr(e?.message || "fetch failed");
     }
   }
+
+  async function suggestBestPair(): Promise<{ a:string, b:string } | null> {
+    // Quick heuristic: try last few history items and a few hard-coded seeds
+    const seeds = new Set<string>()
+    for (let i=Math.max(0, history.length-6); i<history.length; i++) seeds.add(history[i].id)
+    // If nothing in history, try some labels from current sidebar
+    for (let i=0;i<Math.min(labels.length, 20);i++){ const name = labels[i]; if (name) seeds.add(`person:${name}`) }
+    const arr = Array.from(seeds).slice(0, 6)
+    if (arr.length < 2) return null
+    let best: any = null
+    for (let i=0;i<arr.length;i++) for (let j=i+1;j<arr.length;j++){
+      try {
+        const [A, B] = await Promise.all([resolveSmart(arr[i]), resolveSmart(arr[j])])
+        if (!A || !B) continue
+        if (A === B) continue
+        const [{ tile: aTile }, { tile: bTile }] = await Promise.all([loadTileSmart(A), loadTileSmart(B)])
+        const da = degreesFor(aTile as any, { workOnly:true, minYears:24 })
+        const db = degreesFor(bTile as any, { workOnly:true, minYears:24 })
+        const m1 = intersectCount(da.firstIds, db.firstIds)
+        const m2 = intersectCount(da.secondIds, db.secondIds)
+        const cAB = intersectCount(da.firstIds, db.secondIds)
+        const cBA = intersectCount(db.firstIds, da.secondIds)
+        const aOnly = diffCount(new Set([...da.firstIds, ...da.secondIds]), new Set([...db.firstIds, ...db.secondIds]))
+        const bOnly = diffCount(new Set([...db.firstIds, ...db.secondIds]), new Set([...da.firstIds, ...da.secondIds]))
+        const score = m1*3 + m2*2 + Math.min(cAB, cBA) - Math.abs(aOnly - bOnly)*0.5
+        if (!best || score > best.score) best = { a:A, b:B, score }
+      } catch {}
+    }
+    return best ? { a: best.a, b: best.b } : null
+  }
+
+  function intersectCount(a:Set<string>, b:Set<string>){ let k=0; for (const x of a) if (b.has(x)) k++; return k }
+  function diffCount(a:Set<string>, b:Set<string>){ let k=0; for (const x of a) if (!b.has(x)) k++; return k }
 
   // --- Compare Mode Implementation ---
   function nodeIdFor(tile: any, i: number): string {
@@ -159,27 +293,21 @@ export default function App(){
     const count = tile.count|0
     const edges = tile.edges || new Uint16Array(0)
     const weights: (Float32Array | Uint8Array | undefined) = (tile as any).edgeWeights
-    const nodeFlags: Uint8Array | undefined = (tile as any).flags
 
     const neighbors: number[][] = Array.from({ length: count }, () => [])
     const mAll = edges.length >>> 1
     const minYears = Math.max(0, Math.floor(opts?.minYears ?? 0))
-    const WORK_BIT = 2
+
     for (let i=0;i<mAll;i++){
       const a = edges[i*2]|0, b = edges[i*2+1]|0
       if (a>=count || b>=count) continue
       let keep = true
       if (opts?.workOnly){
+        // STRICT: require explicit edgeWeights and meet threshold; otherwise drop
         keep = false
-        // Prefer explicit weight threshold if provided in edgeWeights (assume years)
         if (weights && (weights as any).length === mAll){
-          const w = (weights as any)[i] as number
+          const w = Number((weights as any)[i])
           if (Number.isFinite(w) && w >= minYears) keep = true
-        }
-        // Fallback to node flags (work bit) when weights unavailable
-        if (!keep && nodeFlags){
-          const hasWork = (((nodeFlags[a]||0) & WORK_BIT) !== 0) || (((nodeFlags[b]||0) & WORK_BIT) !== 0)
-          if (hasWork) keep = true
         }
       }
       if (keep){ neighbors[a].push(b); neighbors[b].push(a) }
@@ -187,8 +315,39 @@ export default function App(){
     const first: number[] = Array.from(new Set(neighbors[0]||[])).filter(i=>i>0)
     const seen = new Set<number>([0, ...first])
     const second: number[] = []
-    for (const f of first){ for (const n of neighbors[f]){ if (!seen.has(n)){ seen.add(n); if (n>0) second.push(n) } } }
+    for (const f of first){ for (const n of neighbors[f]||[]){ if (!seen.has(n)){ seen.add(n); if (n>0) second.push(n) } } }
     const firstIds = new Set<string>(first.map(i=>nodeIdFor(tile as any, i)))
+    const secondIds = new Set<string>(second.map(i=>nodeIdFor(tile as any, i)))
+    return { first, second, firstIds, secondIds }
+  }
+
+  // Dual-threshold degrees: first-degree via >= minFirst months edges from center;
+  // second-degree via neighbors-of-first where the second hop uses >= minSecond months.
+  function degreesForDual(tile: ParsedTile, minFirstMonths: number, minSecondMonths: number){
+    const count = tile.count|0
+    const edges = tile.edges || new Uint16Array(0)
+    const weights: (Float32Array | Uint8Array | undefined) = (tile as any).edgeWeights
+    const mAll = edges.length >>> 1
+    const neighbors24: number[][] = Array.from({ length: count }, () => [])
+    const neighbors36: number[][] = Array.from({ length: count }, () => [])
+    for (let i=0;i<mAll;i++){
+      const a = edges[i*2]|0, b = edges[i*2+1]|0
+      if (a>=count || b>=count) continue
+      let w = 0
+      if (weights && (weights as any).length === mAll){
+        w = Number((weights as any)[i])
+      }
+      if (w >= minFirstMonths){ neighbors24[a].push(b); neighbors24[b].push(a) }
+      if (w >= minSecondMonths){ neighbors36[a].push(b); neighbors36[b].push(a) }
+    }
+    const first = Array.from(new Set(neighbors24[0]||[])).filter(i=>i>0)
+    const firstIds = new Set<string>(first.map(i=>nodeIdFor(tile as any, i)))
+    const second: number[] = []
+    const seen = new Set<number>([0, ...first])
+    for (const f of first){
+      const nbrs = neighbors36[f] || []
+      for (const n of nbrs){ if (!seen.has(n)){ seen.add(n); if (n>0) second.push(n) } }
+    }
     const secondIds = new Set<string>(second.map(i=>nodeIdFor(tile as any, i)))
     return { first, second, firstIds, secondIds }
   }
@@ -229,9 +388,9 @@ export default function App(){
   }
 
   function buildCompareTile(a: ParsedTile, b: ParsedTile, opts?: { highlight?: 'left'|'right'|'overlap' }){
-    // Compute degrees using work-only edges with 2+ years threshold when available
-    const degA = degreesFor(a, { workOnly:true, minYears:24 })
-    const degB = degreesFor(b, { workOnly:true, minYears:24 })
+    // Compute degrees with dual thresholds: 24m for first-degree, 36m for second-degree hops
+    const degA = degreesForDual(a, 24, 36)
+    const degB = degreesForDual(b, 24, 36)
     const mapA = buildIdLabelMap(a as any)
     const mapB = buildIdLabelMap(b as any)
     // Overlap categories
@@ -242,8 +401,84 @@ export default function App(){
     const aOnly = Array.from(new Set<string>([...degA.firstIds, ...degA.secondIds])).filter(id=>!degB.firstIds.has(id) && !degB.secondIds.has(id))
     const bOnly = Array.from(new Set<string>([...degB.firstIds, ...degB.secondIds])).filter(id=>!degA.firstIds.has(id) && !degA.secondIds.has(id))
 
+    // Sanity diagnostics: if strict work-only graph is empty, surface a clear message instead of drawing nothing
+    const totalCats = degA.first.length + degA.second.length + degB.first.length + degB.second.length
+    if (totalCats === 0) {
+      try { setErr('No work-overlap edges (>=24 months) found for either ego. Please choose another pair or relax the threshold.'); } catch {}
+    } else {
+      try {
+        console.log('Compare(work-only):', {
+          A: { first: degA.first.length, second: degA.second.length },
+          B: { first: degB.first.length, second: degB.second.length },
+          mutual: { first: mutualF1.length, second: mutualF2.length },
+          cross: { A1_B2: aF1_bF2.length, B1_A2: bF1_aF2.length }
+        })
+      } catch {}
+    }
+
     // Map id -> source tile and original index to get labels
     const labelFor = (id:string)=> mapA.get(id) || mapB.get(id) || id
+
+    // Deterministic helpers
+    const hashStr01 = (s:string): number => {
+      let h = 2166136261 >>> 0
+      for (let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0 }
+      return (h % 100000) / 100000
+    }
+    const clamp = (x:number, a:number, b:number)=> Math.max(a, Math.min(b, x))
+    const inSemiRing = (x:number,y:number,cx:number,cy:number,rIn:number,rOut:number)=>{
+      const dx=x-cx, dy=y-cy; const d=Math.hypot(dx,dy)
+      return (y <= cy + 1) && (d >= rIn) && (d <= rOut)
+    }
+    const projectIntoSemiRing = (x:number,y:number,cx:number,cy:number,rIn:number,rOut:number)=>{
+      // Force into upper half
+      const yy = Math.min(y, cy)
+      const dx = x - cx, dy = yy - cy
+      const d = Math.max(1e-6, Math.hypot(dx,dy))
+      let r = clamp(d, Math.max(0,rIn), Math.max(rIn+1,rOut))
+      const ux = dx / d, uy = dy / d
+      return { x: cx + ux * r, y: cy + uy * r }
+    }
+    const placeDeterministic = (
+      ids: string[], cx:number, cy:number, rMin:number, rMax:number,
+      pred: (x:number,y:number)=> boolean,
+      opts2:{ baseSize:number, bgSize:number, region:'left'|'right'|'overlap', ring:'first'|'second'|'cross', highlight?:boolean }
+    )=>{
+      const indices: number[] = []
+      const highlightRegion = opts?.highlight || null
+      const emphasize = (highlightRegion && highlightRegion === opts2.region)
+      const ratio = emphasize ? 1.0 : (opts2.ring === 'first' || opts2.ring === 'cross' ? 0.22 : 0.16)
+      const maxStrong = Math.ceil(ids.length * ratio)
+      const strongEvery = Math.max(1, Math.floor(ids.length / Math.max(1, maxStrong)))
+      for (let i=0;i<ids.length;i++){
+        const id = ids[i]
+        // deterministic angle in [0, PI]
+        const t = hashStr01(id)
+        const ang = Math.PI * t
+        // deterministic radius within [rMin, rMax]
+        const rj = rMin + (rMax - rMin) * hashStr01(id + ':r')
+        let x = cx + Math.cos(ang) * rj
+        let y = cy - Math.sin(ang) * rj
+        if (!pred(x,y)){
+          // try small deterministic jitter and then project
+          const jx = (hashStr01(id + ':jx') - 0.5) * Math.min(18, (rMax - rMin) * 0.1)
+          const jy = (hashStr01(id + ':jy') - 0.5) * Math.min(18, (rMax - rMin) * 0.1)
+          let xx = x + jx, yy = y + jy
+          if (!pred(xx,yy)){
+            const p = projectIntoSemiRing(xx, yy, cx, cy, rMin, rMax)
+            xx = p.x; yy = p.y
+          }
+          x = xx; y = yy
+        }
+        nodes.push(x, y)
+        const isStrong = (i % strongEvery === 0) || emphasize
+        size.push(isStrong ? opts2.baseSize : opts2.bgSize)
+        alpha.push(isStrong ? 0.85 : 0.18)
+        labels.push(labelFor(id))
+        indices.push((nodes.length/2)-1)
+      }
+      return indices
+    }
 
     // Even downsampling helper so we show ~1/2 of nodes per group
     const sampleEven = <T,>(arr: T[], fraction = 0.5): T[] => {
@@ -271,77 +506,49 @@ export default function App(){
     const alpha: number[] = []
     const labels: string[] = []
     const indexGroups = { left: [] as number[], right: [] as number[], overlap: [] as number[] }
+    const seenIds = new Set<string>()
 
-    // Center nodes for A and B
-    nodes.push(leftCX, baseCY); size.push(14); alpha.push(1.0); labels.push(labelFor(nodeIdFor(a as any, 0)))
-    nodes.push(rightCX, baseCY); size.push(14); alpha.push(1.0); labels.push(labelFor(nodeIdFor(b as any, 0)))
+    // Center nodes for A and B (reserve their ids so no duplicates appear as orange dots)
+    const centerAId = nodeIdFor(a as any, 0)
+    const centerBId = nodeIdFor(b as any, 0)
+    seenIds.add(centerAId); seenIds.add(centerBId)
+    nodes.push(leftCX, baseCY); size.push(14); alpha.push(1.0); labels.push(labelFor(centerAId))
+    nodes.push(rightCX, baseCY); size.push(14); alpha.push(1.0); labels.push(labelFor(centerBId))
 
-    // Ring placements
-    function addGroupFilled(ids:string[], cx:number, cy:number, rMin:number, rMax:number, opts2:{ baseSize:number, bgSize:number, region:'left'|'right'|'overlap', ring:'first'|'second'|'cross', pred?:(x:number,y:number)=>boolean }){
-      const gen = ()=> pointsInHalfAnnulus(cx, cy, Math.max(0, rMin), Math.max(rMin+1, rMax), Math.max(1, ids.length))
-      // Best-candidate acceptance constrained by predicate to keep all points INSIDE shaded region
-      const raw = gen()
-      const pts: Array<{x:number,y:number}> = []
+    // Ring placements (deterministic & bounded). Dedupe by id before placing.
+    function addGroupDet(idsIn:string[], cx:number, cy:number, rMin:number, rMax:number, opts2:{ baseSize:number, bgSize:number, region:'left'|'right'|'overlap', ring:'first'|'second'|'cross', pred?:(x:number,y:number)=>boolean }){
       const pred = opts2.pred || (()=>true)
-      const minDist2 = 25 // keep minimal spacing in world units (center-out rings)
-      for (let k=0;k<raw.length*5 && pts.length<ids.length;k++){
-        const p = raw[k % raw.length]
-        if (!pred(p.x, p.y)) continue
-        let ok = true
-        for (let j=0;j<pts.length;j++){ const q=pts[j]; const dx=p.x-q.x, dy=p.y-q.y; if (dx*dx+dy*dy < minDist2) { ok=false; break } }
-        if (ok) pts.push(p)
-      }
-      while (pts.length < ids.length) { // fallback
-        const p = raw[Math.floor(Math.random()*raw.length)]
-        if (pred(p.x,p.y)) pts.push(p)
-      }
-      // Center-out ordering: sort by radius from region center
-      const order = pts.map((p,idx)=>({ idx, r: Math.hypot(p.x - cx, p.y - cy) })).sort((a,b)=> a.r - b.r).map(o=>o.idx)
-      const highlightRegion = opts?.highlight || null
-      const emphasize = (highlightRegion && highlightRegion === opts2.region)
-      const ratio = emphasize ? 1.0 : (opts2.ring === 'first' || opts2.ring === 'cross' ? 0.22 : 0.16)
-      const maxStrong = Math.ceil(ids.length * ratio)
-      const strongEvery = Math.max(1, Math.floor(ids.length / Math.max(1, maxStrong)))
-      for (let i=0;i<ids.length;i++){
-        const p = pts[order[i] || i]
-        const isStrong = (i % strongEvery === 0) || emphasize
-        const drawSize = isStrong ? opts2.baseSize : opts2.bgSize
-        const drawAlpha = isStrong ? 0.85 : 0.18
-        nodes.push(p.x, p.y)
-        size.push(drawSize)
-        alpha.push(drawAlpha)
-        labels.push(labelFor(ids[order[i] || i]))
-        indexGroups[opts2.region].push((nodes.length/2)-1)
-      }
+      const ids = idsIn.filter(id=>{ if (seenIds.has(id)) return false; seenIds.add(id); return true })
+      const placed = placeDeterministic(ids, cx, cy, Math.max(0,rMin), Math.max(rMin+1,rMax), pred, opts2)
+      for (const idx of placed) indexGroups[opts2.region].push(idx)
     }
 
     // Geometry helpers for region predicates
-    const insideHalfAnnulus = (x:number,y:number, cx:number, cy:number, rIn:number, rOut:number)=>{
-      if (y > cy + 1) return false; const dx=x-cx, dy=y-cy; const d=Math.sqrt(dx*dx+dy*dy); return d>=rIn && d<=rOut
-    }
+    const insideHalfAnnulus = (x:number,y:number, cx:number, cy:number, rIn:number, rOut:number)=> inSemiRing(x,y,cx,cy,rIn,rOut)
     const dTo = (x:number,y:number,cx:number,cy:number)=> Math.hypot(x-cx,y-cy)
     const inLeftFirst = (x:number,y:number)=> dTo(x,y,leftCX,baseCY) <= r1 && y <= baseCY
     const inRightFirst = (x:number,y:number)=> dTo(x,y,rightCX,baseCY) <= r1 && y <= baseCY
     const inLeftSecond = (x:number,y:number)=> dTo(x,y,leftCX,baseCY) > r1 && dTo(x,y,leftCX,baseCY) <= r2 && y <= baseCY
     const inRightSecond = (x:number,y:number)=> dTo(x,y,rightCX,baseCY) > r1 && dTo(x,y,rightCX,baseCY) <= r2 && y <= baseCY
 
-    // First-degree unique and mutual
-    addGroupFilled(sampleEven(Array.from(degA.firstIds).filter(id=>!mutualF1.includes(id) && !aF1_bF2.includes(id))), leftCX, baseCY, 0, r1, { baseSize:4.6, bgSize:0.8, region:'left', ring:'first', pred:(x,y)=> inLeftFirst(x,y) && !(inRightFirst(x,y) || inRightSecond(x,y)) })
-    addGroupFilled(sampleEven(Array.from(degB.firstIds).filter(id=>!mutualF1.includes(id) && !bF1_aF2.includes(id))), rightCX, baseCY, 0, r1, { baseSize:4.6, bgSize:0.8, region:'right', ring:'first', pred:(x,y)=> inRightFirst(x,y) && !(inLeftFirst(x,y) || inLeftSecond(x,y)) })
-    addGroupFilled(sampleEven(mutualF1), midCX, baseCY, 0, r1, { baseSize:5.0, bgSize:0.9, region:'overlap', ring:'first', pred:(x,y)=> inLeftFirst(x,y) && inRightFirst(x,y) })
+    // First-degree unique and mutual — keep a clear gap around centers so no dot sits on a center
+    const firstInnerGap = Math.max(28, Math.floor(r1 * 0.18))
+    addGroupDet(sampleEven(Array.from(degA.firstIds).filter(id=>!mutualF1.includes(id) && !aF1_bF2.includes(id))), leftCX, baseCY, firstInnerGap, r1, { baseSize:4.6, bgSize:0.8, region:'left', ring:'first', pred:(x,y)=> inLeftFirst(x,y) && !(inRightFirst(x,y) || inRightSecond(x,y)) })
+    addGroupDet(sampleEven(Array.from(degB.firstIds).filter(id=>!mutualF1.includes(id) && !bF1_aF2.includes(id))), rightCX, baseCY, firstInnerGap, r1, { baseSize:4.6, bgSize:0.8, region:'right', ring:'first', pred:(x,y)=> inRightFirst(x,y) && !(inLeftFirst(x,y) || inLeftSecond(x,y)) })
+    addGroupDet(sampleEven(mutualF1), midCX, baseCY, firstInnerGap, r1, { baseSize:5.0, bgSize:0.9, region:'overlap', ring:'first', pred:(x,y)=> inLeftFirst(x,y) && inRightFirst(x,y) })
     // Cross ring (first of A that are second of B) and vice versa → place near mid but biased
-    addGroupFilled(sampleEven(aF1_bF2), (leftCX+midCX)/2, baseCY, 0, r1, { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross', pred:(x,y)=> inLeftFirst(x,y) && inRightSecond(x,y) && !inRightFirst(x,y) })
-    addGroupFilled(sampleEven(bF1_aF2), (rightCX+midCX)/2, baseCY, 0, r1, { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross', pred:(x,y)=> inRightFirst(x,y) && inLeftSecond(x,y) && !inLeftFirst(x,y) })
+    addGroupDet(sampleEven(aF1_bF2), (leftCX+midCX)/2, baseCY, firstInnerGap, r1, { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross', pred:(x,y)=> inLeftFirst(x,y) && inRightSecond(x,y) && !inRightFirst(x,y) })
+    addGroupDet(sampleEven(bF1_aF2), (rightCX+midCX)/2, baseCY, firstInnerGap, r1, { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross', pred:(x,y)=> inRightFirst(x,y) && inLeftSecond(x,y) && !inLeftFirst(x,y) })
 
     // Second-degree
-    addGroupFilled(sampleEven(Array.from(degA.secondIds).filter(id=>!mutualF2.includes(id))), leftCX, baseCY, r1, r2, { baseSize:3.4, bgSize:0.7, region:'left', ring:'second', pred:(x,y)=> inLeftSecond(x,y) && !(inRightFirst(x,y) || inRightSecond(x,y)) })
-    addGroupFilled(sampleEven(Array.from(degB.secondIds).filter(id=>!mutualF2.includes(id))), rightCX, baseCY, r1, r2, { baseSize:3.4, bgSize:0.7, region:'right', ring:'second', pred:(x,y)=> inRightSecond(x,y) && !(inLeftFirst(x,y) || inLeftSecond(x,y)) })
-    addGroupFilled(sampleEven(mutualF2), midCX, baseCY, r1, r2, { baseSize:3.6, bgSize:0.8, region:'overlap', ring:'second', pred:(x,y)=> inLeftSecond(x,y) && inRightSecond(x,y) && !(inLeftFirst(x,y) && inRightFirst(x,y)) })
+    addGroupDet(sampleEven(Array.from(degA.secondIds).filter(id=>!mutualF2.includes(id))), leftCX, baseCY, r1, r2, { baseSize:3.4, bgSize:0.7, region:'left', ring:'second', pred:(x,y)=> inLeftSecond(x,y) && !(inRightFirst(x,y) || inRightSecond(x,y)) })
+    addGroupDet(sampleEven(Array.from(degB.secondIds).filter(id=>!mutualF2.includes(id))), rightCX, baseCY, r1, r2, { baseSize:3.4, bgSize:0.7, region:'right', ring:'second', pred:(x,y)=> inRightSecond(x,y) && !(inLeftFirst(x,y) || inLeftSecond(x,y)) })
+    addGroupDet(sampleEven(mutualF2), midCX, baseCY, r1, r2, { baseSize:3.6, bgSize:0.8, region:'overlap', ring:'second', pred:(x,y)=> inLeftSecond(x,y) && inRightSecond(x,y) && !(inLeftFirst(x,y) && inRightFirst(x,y)) })
 
     // Non-overlapping pools (optional, already covered above as A-only/B-only across rings)
     // Use small jitter around outer radius
-    addGroupFilled(sampleEven(aOnly), leftCX-40, baseCY, r2+10, r2+80, { baseSize:3.8, bgSize:1.6, region:'left' })
-    addGroupFilled(sampleEven(bOnly), rightCX+40, baseCY, r2+10, r2+80, { baseSize:3.8, bgSize:1.6, region:'right' })
+    addGroupDet(sampleEven(aOnly), leftCX-40, baseCY, r2+10, r2+80, { baseSize:3.8, bgSize:1.6, region:'left', ring:'second' as any })
+    addGroupDet(sampleEven(bOnly), rightCX+40, baseCY, r2+10, r2+80, { baseSize:3.8, bgSize:1.6, region:'right', ring:'second' as any })
 
     const out: ParsedTile = {
       count: nodes.length/2,
@@ -439,6 +646,7 @@ export default function App(){
       const [aIn, bIn] = parts
       const [aId, bId] = await Promise.all([resolveSmart(aIn), resolveSmart(bIn)])
       if (!aId || !bId) { setErr('Could not resolve one or both ids for compare.'); return }
+      if (aId === bId) { setErr('Please choose two different people to compare.'); return }
       setErr(null)
       setFocus(`${aId} + ${bId}`)
       const [{ tile: aTile }, { tile: bTile }] = await Promise.all([loadTileSmart(aId), loadTileSmart(bId)])
@@ -487,11 +695,20 @@ export default function App(){
     const onKey = (e: KeyboardEvent)=>{
       const active = document.activeElement as HTMLElement | null
       const isTyping = !!(active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || (active as any)?.isContentEditable))
-      if (e.key === 'ArrowDown' && typeof selectedIndex === 'number') setSelectedIndex(i=> (i+1) % metaNodes.length)
-      if (e.key === 'ArrowUp' && typeof selectedIndex === 'number') setSelectedIndex(i=> (i-1 + metaNodes.length) % metaNodes.length)
+      if (e.key === 'ArrowDown' && typeof selectedIndex === 'number') setSelectedIndex((prev)=>{
+        const cur = (typeof prev === 'number' ? prev : 0)
+        return (cur + 1) % metaNodes.length
+      })
+      if (e.key === 'ArrowUp' && typeof selectedIndex === 'number') setSelectedIndex((prev)=>{
+        const cur = (typeof prev === 'number' ? prev : 0)
+        return (cur - 1 + metaNodes.length) % metaNodes.length
+      })
       if (e.key === 'ArrowRight' && typeof selectedIndex === 'number') {
-        setSelectedIndex(i=> (i+1) % metaNodes.length)
-        ;(sceneRef.current as any)?.focusIndex?.((i+1) % metaNodes.length, { zoom: 0.9 })
+        setSelectedIndex((prev)=>{
+          const next = ((typeof prev === 'number' ? prev : 0) + 1) % metaNodes.length
+          ;(sceneRef.current as any)?.focusIndex?.(next, { zoom: 0.9 })
+          return next
+        })
       }
       if (e.key === 'ArrowLeft') {
         if (isTyping) return
@@ -543,17 +760,42 @@ export default function App(){
 
   return (
     <div className="w-full h-full" style={{ background: "transparent", color: "white", position:'fixed', inset:0, overflow:'hidden' }}>
-      <CanvasScene ref={sceneRef as any} concentric={concentric} selectedIndex={selectedIndex} visibleMask={(metaNodes && jobFilter !== null && jobFilter.trim() !== '') ? metaNodes.map((m, idx)=>{
-        const t = (m?.title || '').toLowerCase()
-        const q = (jobFilter||'').toLowerCase()
-        // Keep center index 0 always visible
-        if (idx === 0) return true
-        return t.includes(q)
-      }) : null} onPick={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate:true, ms:520, zoomMultiplier: 6 }); }} onClear={()=>{ sceneRef.current?.clear(); setFocus(null); }} onStats={(fps,count)=>{ setFps(fps); setNodeCount(count) }} onRegionClick={onRegionClick} />
+      {rendererMode === 'canvas' ? (
+        <CanvasScene
+          ref={handleSceneRef}
+          concentric={concentric}
+          selectedIndex={selectedIndex}
+          visibleMask={visibleMask}
+          onPick={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate:true, ms:520, zoomMultiplier: 6 }); }}
+          onClear={()=>{ sceneRef.current?.clear(); setFocus(null); }}
+          onStats={(fps,count)=>{ setFps(fps); setNodeCount(count) }}
+          onRegionClick={onRegionClick}
+        />
+      ) : (
+        <CosmoScene
+          ref={handleSceneRef}
+          concentric={concentric}
+          selectedIndex={selectedIndex}
+          visibleMask={visibleMask}
+          onPick={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate:true, ms:520, zoomMultiplier: 6 }); }}
+          onClear={()=>{ sceneRef.current?.clear(); setFocus(null); }}
+          onStats={(fps,count)=>{ setFps(fps); setNodeCount(count) }}
+          onRegionClick={onRegionClick}
+        />
+      )}
+      <div style={{ position:'absolute', top:16, right:24, zIndex:30, display:'flex', gap:8 }}>
+        <button
+          onClick={()=> setRendererMode(mode => mode === 'canvas' ? 'cosmograph' : 'canvas')}
+          style={{ padding:'6px 12px', borderRadius:8, border:'1px solid rgba(255,255,255,0.24)', background:'rgba(255,255,255,0.08)', color:'#fff', fontSize:13 }}
+        >
+          Renderer: {rendererMode === 'canvas' ? 'Canvas' : 'Cosmograph'} (switch)
+        </button>
+      </div>
       <Sidebar 
         open={sidebarOpen} 
         onToggle={()=>setSidebarOpen(!sidebarOpen)} 
         items={(sidebarIndices ? sidebarIndices : Array.from({length: Math.max(0,nodeCount)},(_,i)=>i)).map((i)=>({ index:i, group:(i%8), name: labels[i], title: (metaNodes[i] as any)?.title || null, avatarUrl: avatars[i] }))}
+        selectedIndex={selectedIndex}
         onSelect={(i)=>{ setSelectedIndex(i); }} 
         onDoubleSelect={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate: true, ms: 520, zoomMultiplier: 8 }); setSidebarOpen(false); }} 
       />
@@ -563,22 +805,20 @@ export default function App(){
           style={{ padding:'6px 8px', borderRadius:8, border:'1px solid rgba(255,255,255,0.2)', background:'rgba(255,255,255,0.06)', color:'#fff', width:220 }} />
         {jobFilter && <button onClick={()=> setJobFilter(null)} style={{ padding:'6px 10px', borderRadius:8, background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.2)' }}>Clear</button>}
       </div>
-      <CommandBar onRun={run} />
-      {/* AgentProbe removed from main UI (kept file for diagnostics) */}
-      <HUD focus={focus} nodes={nodeCount} fps={fps} selectedIndex={selectedIndex} concentric={concentric} onToggleConcentric={()=>setConcentric(c=>!c)} onSettings={()=>setShowSettings(true)} onBack={()=>{ if(cursor>0 && history[cursor]){ const cur=history[cursor]; const prev=history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); run(prev.id, { pushHistory:false, overrideMove:{ x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) } }} onForward={()=>{ if(cursor<history.length-1){ const next=history[cursor+1]; setCursor(cursor+1); if (next?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: next.turn||0 } })); run(next.id, { pushHistory:false, overrideMove:{ x: next?.move?.x||0, y: next?.move?.y||0 } }) } }} canBack={cursor>0} canForward={cursor<history.length-1} />
-      {/* Top-left nav for panels */}
-      <div style={{ position:'absolute', top:12, left:12, zIndex:16, display:'flex', gap:8 }}>
-        <button onClick={()=> setShowContacts(s=>!s)} style={{ padding:'8px 10px', borderRadius:10, background: showContacts? '#4f7cff' : 'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.15)' }}>Company Contacts</button>
-        <button onClick={()=> setShowNLQ(s=>!s)} style={{ padding:'8px 10px', borderRadius:10, background: showNLQ? '#4f7cff' : 'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.15)' }}>Ask (NLQ)</button>
-      </div>
-      {showContacts && (
-        <CompanyContacts />
-      )}
-      {showNLQ && (
-        <div style={{ position:'absolute', top:56, left:12, right:12, bottom:12, zIndex:12, overflow:'auto', background:'rgba(0,0,0,0.28)', border:'1px solid rgba(255,255,255,0.15)', borderRadius:12 }}>
-          <NaturalLanguage />
-        </div>
-      )}
+      <CommandBar
+        onRun={run}
+        focus={focus}
+        selectedIndex={selectedIndex}
+        nodes={nodeCount}
+        fps={fps}
+        onBack={()=>{ if(cursor>0 && history[cursor]){ const cur=history[cursor]; const prev=history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); run(prev.id, { pushHistory:false, overrideMove:{ x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) } }}
+        onForward={()=>{ if(cursor<history.length-1){ const next=history[cursor+1]; setCursor(cursor+1); if (next?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: next.turn||0 } })); run(next.id, { pushHistory:false, overrideMove:{ x: next?.move?.x||0, y: next?.move?.y||0 } }) } }}
+        canBack={cursor>0}
+        canForward={cursor<history.length-1}
+        onReshape={(mode)=>{ (sceneRef.current as any)?.reshapeLayout?.(mode, { animate:true, ms:520 }) }}
+        onSettings={()=>setShowSettings(true)}
+      />
+      {/* HUD is now replaced by inline controls within CommandBar */}
       {/* demo buttons removed */}
       {err && (
         <div style={{ position:'absolute', top:52, left:12, right:12, padding:'10px 12px', background:'rgba(200,40,60,0.2)', border:'1px solid rgba(255,80,100,0.35)', color:'#ffbfc9', borderRadius:10, zIndex:11 }}>
@@ -592,5 +832,3 @@ export default function App(){
     </div>
   );
 }
-
-

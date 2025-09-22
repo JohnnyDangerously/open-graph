@@ -1,16 +1,7 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import AnimatedNetworkBubbles from '../ui/AnimatedNetworkBubbles'
 import type { ParsedTile } from './parse'
-
-type Exposed = { setForeground: (fg: ParsedTile) => void, clear: () => void, focusIndex: (index: number, opts?:{ zoom?: number, zoomMultiplier?: number, animate?: boolean, ms?: number }) => void }
-type Props = { 
-  onStats?: (fps: number, count: number) => void, 
-  concentric?: boolean, 
-  onPick?: (index: number) => void, 
-  onClear?: () => void, 
-  onRegionClick?: (region: 'left'|'right'|'overlap') => void,
-  selectedIndex?: number | null,
-  visibleMask?: boolean[] | null
-}
+import type { GraphSceneHandle, GraphSceneProps } from './types'
 
 type Node = {
   x: number
@@ -18,17 +9,19 @@ type Node = {
   size: number
   alpha: number
   index: number
+  group: number
 }
 
 type Edge = {
   source: number
   target: number
+  weight: number
 }
 
-const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [tile, setTile] = useState<ParsedTile | null>(null)
-  const labelsRef = useRef<string[] | null>(null)
+const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function CanvasScene(props: GraphSceneProps, ref: React.ForwardedRef<GraphSceneHandle>) {
+  const canvasRef = useRef(null as HTMLCanvasElement | null)
+  const [tile, setTile] = useState(null as ParsedTile | null)
+  const labelsRef = useRef(null as string[] | null)
   const [tx, setTx] = useState(0)
   const [ty, setTy] = useState(0)
   const [scale, setScale] = useState(1)
@@ -38,21 +31,40 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
   useEffect(()=>{ txRef.current = tx }, [tx])
   useEffect(()=>{ tyRef.current = ty }, [ty])
   useEffect(()=>{ scaleRef.current = scale }, [scale])
-  const nodesRef = useRef<Node[]>([])
-  const visibleMaskRef = useRef<boolean[] | null>(null)
-  const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 })
-  const draggingNodeRef = useRef<Node | null>(null)
+  const nodesRef = useRef([] as Node[])
+  const visibleMaskRef = useRef(null as boolean[] | null)
+  const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 } as { width: number, height: number, dpr?: number })
+  const [showTestToast, setShowTestToast] = useState<string | null>(null)
+  const [showBubbles, setShowBubbles] = useState(false)
+  const draggingNodeRef = useRef(null as Node | null)
   const dragLastRef = useRef<{ x: number, y: number } | null>(null)
   const isPanningRef = useRef(false)
-  const animFrameRef = useRef<number>(0)
+  const animFrameRef = useRef(0 as number)
   // Keep latest tile and a short trail of previous graphs (max 2)
-  const tileRef = useRef<ParsedTile | null>(null)
+  const tileRef = useRef(null as ParsedTile | null)
   useEffect(()=>{ tileRef.current = tile }, [tile])
-  const trailRef = useRef<Array<{ nodes: Float32Array, size: Float32Array, alpha: Float32Array, edges?: Uint16Array, center:{x:number,y:number}, color:string }>>([])
+  const trailRef = useRef([] as Array<{ nodes: Float32Array, size: Float32Array, alpha: Float32Array, edges?: Uint32Array, center:{x:number,y:number}, color:string }>)
   const trailColors = ['#5ec8ff', '#ff8ac2'] // newest → oldest
-  
+
+  const groupStyles = React.useMemo<Record<number, { fill: string; glow: string; border: string; base: number; min: number }>>(() => ({
+    0: { fill: 'rgba(243, 93, 143, 0.92)', glow: 'rgba(243, 93, 143, 0.24)', border: 'rgba(173, 44, 89, 0.95)', base: 2.4, min: 0.9 },
+    1: { fill: 'rgba(255, 211, 105, 0.9)', glow: 'rgba(255, 211, 105, 0.22)', border: 'rgba(188, 140, 24, 0.95)', base: 2.6, min: 1.0 },
+    2: { fill: 'rgba(74, 215, 209, 0.9)', glow: 'rgba(74, 215, 209, 0.22)', border: 'rgba(28, 152, 150, 0.95)', base: 2.4, min: 0.9 }
+  }), [])
+
+  const computeNodeRadius = React.useCallback((node: Node, scaleValue: number) => {
+    // Keep nodes a constant screen-space size (no resize on zoom)
+    const style = groupStyles[node.group as 0|1|2] || groupStyles[1]
+    const sizeFactor = 0.40 + Math.min(0.9, Math.max(0.12, node.size * 0.45))
+    const globalShrink = 1.5 // 3x larger than previous constant size
+    return Math.max(
+      style.min * 0.5,
+      style.base * 0.5 * sizeFactor * globalShrink
+    )
+  }, [groupStyles])
+
   // Convert tile data to nodes/edges
-  const { nodes, edges } = React.useMemo(() => {
+  const { nodes, edges } = React.useMemo((): { nodes: Node[], edges: Edge[] } => {
     if (!tile) return { nodes: [], edges: [] }
     
     console.log('CanvasScene: Processing tile:', {
@@ -67,12 +79,13 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
     
     const nodes: Node[] = []
     for (let i = 0; i < tile.count; i++) {
-      const node = {
+      const node: Node = {
         x: tile.nodes[i * 2],
         y: tile.nodes[i * 2 + 1],
         size: tile.size[i],
         alpha: tile.alpha[i],
-        index: i
+        index: i,
+        group: tile.group ? tile.group[i] : 0
       }
       nodes.push(node)
       
@@ -85,9 +98,11 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
     const edges: Edge[] = []
     if (tile.edges) {
       for (let i = 0; i < tile.edges.length; i += 2) {
+        const edgeIndex = i / 2
         edges.push({
           source: tile.edges[i],
-          target: tile.edges[i + 1]
+          target: tile.edges[i + 1],
+          weight: tile.edgeWeights ? tile.edgeWeights[edgeIndex] ?? 1 : 1
         })
       }
       console.log(`Created ${edges.length} edges`)
@@ -101,7 +116,7 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
   useEffect(()=>{ visibleMaskRef.current = (Array.isArray(props.visibleMask) ? props.visibleMask : null) }, [props.visibleMask])
 
   useImperativeHandle(ref, () => ({
-    setForeground: (fg, opts?: { noTrailSnapshot?: boolean }) => {
+    setForeground: (fg: ParsedTile, opts?: { noTrailSnapshot?: boolean }) => {
       console.log('CanvasScene setForeground: Received fg:', {
         count: fg?.count,
         nodesLength: fg?.nodes?.length,
@@ -120,12 +135,12 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
               nodes: new Float32Array(prev.nodes),
               size: new Float32Array(prev.size),
               alpha: new Float32Array(prev.alpha),
-              edges: prev.edges ? new Uint16Array(prev.edges) : undefined,
+              edges: prev.edges ? new Uint32Array(prev.edges) : undefined,
               center: (prev.focusWorld && typeof prev.focusWorld.x === 'number') ? { x: prev.focusWorld.x, y: prev.focusWorld.y } : { x: prev.nodes[0]||0, y: prev.nodes[1]||0 },
               color: trailColors[0]
             }
-            const nextTrail = [snap, ...trailRef.current].slice(0, 2)
-            // Rotate colors so newest uses first color
+            const currentTrail = trailRef.current
+            const nextTrail = [snap, ...currentTrail].slice(0, 2)
             for (let i=0;i<nextTrail.length;i++) nextTrail[i].color = trailColors[i] || '#88a'
             trailRef.current = nextTrail
           }
@@ -137,14 +152,23 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       setTx(0)
       setTy(0)
       setScale(1)
+      const hasCohorts = !!(fg as any)?.group && ((fg as any).group as Uint16Array).length > 0 && (() => {
+        try {
+          const g = new Set(Array.from((fg as any).group as Uint16Array))
+          return g.has(0) && g.has(1) && g.has(2)
+        } catch { return false }
+      })()
+      // Start fully zoomed out and centered: use larger padding to compute bounds, then set target zoom to minimal
+      const preferredPadding = hasCohorts ? 140 : 180
+      const zoomMultiplier = 0.15 // start much farther zoomed out after fit
       setTimeout(() => {
         console.log('About to call fitToContent...')
-        fitToContent()
+        fitToContent(preferredPadding)
         try {
           // Wait two more frames so fitToContent state is applied
           requestAnimationFrame(()=>{
             requestAnimationFrame(()=>{
-          const spawn = (fg as any).spawn
+              const spawn = (fg as any).spawn
               const focusWorld = (fg as any).focusWorld
               // Fallback to center node from incoming tile if no explicit focus target
               const fallbackX = Array.isArray((fg as any).nodes) ? (fg as any).nodes[0] : undefined
@@ -152,13 +176,15 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
               const wantFocus = (focusWorld && typeof focusWorld.x === 'number' && typeof focusWorld.y === 'number')
                 ? focusWorld
                 : (typeof fallbackX === 'number' && typeof fallbackY === 'number' ? { x: fallbackX, y: fallbackY } : null)
-              const zoom2x = Math.min(3.5, (scaleRef.current || 1) * 2.0)
+              const currentScale = scaleRef.current || 1
+              // After fitToContent, jump directly to far-zoomed view
+              const targetZoom = Math.min(3.0, Math.max(0.05, currentScale * zoomMultiplier))
               if (focusWorld && typeof focusWorld.x === 'number' && typeof focusWorld.y === 'number'){
-                centerOnWorld(focusWorld.x, focusWorld.y, { animate: true, ms: 500, zoom: zoom2x })
+                centerOnWorld(0, 0, { animate: true, ms: 520, zoom: targetZoom })
               } else if (spawn && typeof spawn.x === 'number' && typeof spawn.y === 'number'){
-                centerOnWorld(spawn.x, spawn.y, { animate: true, ms: 420, zoom: zoom2x })
+                centerOnWorld(0, 0, { animate: true, ms: 460, zoom: targetZoom })
               } else if (wantFocus) {
-                centerOnWorld(wantFocus.x, wantFocus.y, { animate: true, ms: 480, zoom: zoom2x })
+                centerOnWorld(0, 0, { animate: true, ms: 480, zoom: targetZoom })
               }
             })
           })
@@ -178,7 +204,7 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
             nodes: new Float32Array(prevCurrent.nodes),
             size: new Float32Array(prevCurrent.size),
             alpha: new Float32Array(prevCurrent.alpha),
-            edges: prevCurrent.edges ? new Uint16Array(prevCurrent.edges) : undefined,
+            edges: prevCurrent.edges ? new Uint32Array(prevCurrent.edges) : undefined,
             center: (prevCurrent.focusWorld && typeof prevCurrent.focusWorld.x === 'number') ? { x: prevCurrent.focusWorld.x, y: prevCurrent.focusWorld.y } : { x: prevCurrent.nodes[0]||0, y: prevCurrent.nodes[1]||0 },
             color: trailColors[0]
           }
@@ -194,7 +220,7 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
           nodes: new Float32Array(nextCurrent.nodes),
           size: new Float32Array(nextCurrent.size),
           alpha: new Float32Array(nextCurrent.alpha),
-          edges: nextCurrent.edges ? new Uint16Array(nextCurrent.edges) : undefined,
+          edges: nextCurrent.edges ? new Uint32Array(nextCurrent.edges) : undefined,
         }
         ;(fg as any).focusWorld = { x: nextCurrent.center.x, y: nextCurrent.center.y }
         ;(fg as any).labels = null
@@ -206,7 +232,7 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
         setTy(0)
         setScale(1)
         setTimeout(()=>{
-          fitToContent()
+          fitToContent(120)
           requestAnimationFrame(()=>{
             requestAnimationFrame(()=>{
               centerOnWorld(nextCurrent.center.x, nextCurrent.center.y, { animate:true, ms: 460 })
@@ -221,6 +247,7 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       setTx(0)
       setTy(0)
       setScale(1)
+      trailRef.current = []
     },
     focusIndex: (index: number, opts?:{ zoom?: number, zoomMultiplier?: number, animate?: boolean, ms?: number }) => {
       const canvas = canvasRef.current
@@ -236,6 +263,105 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       const { width:w, height:h } = getCanvasLogicalSize()
       console.log('focusIndex:', { index, targetScale, canvasSize: `${w}x${h}`, nodeWorld: { x:n.x, y:n.y } })
       centerOnWorld(n.x, n.y, { zoom: targetScale, animate: !!opts?.animate, ms: opts?.ms })
+    },
+    reshapeLayout: (mode: 'hierarchy'|'radial'|'grid'|'concentric', opts?:{ animate?: boolean, ms?: number })=>{
+      const t = tileRef.current
+      if (!t) return
+      const n = t.count|0
+      const edges = (t as any).edges as Uint32Array | undefined
+      const from = new Float32Array(t.nodes)
+      const target = new Float32Array(from.length)
+      const placeGrid = ()=>{
+        const cols = Math.max(1, Math.ceil(Math.sqrt(n)))
+        const cell = 160
+        for (let i=0;i<n;i++){
+          const r = Math.floor(i/cols), c = i%cols
+          target[i*2] = (c - (cols-1)/2) * cell
+          target[i*2+1] = (r - Math.floor((n-1)/cols)/2) * cell
+        }
+      }
+      const placeRadial = ()=>{
+        // BFS levels if edges exist; else ring by index
+        const level = new Array<number>(n).fill(0)
+        if (edges && edges.length>=2){
+          const adj: number[][] = Array.from({length:n},()=>[])
+          for (let i=0;i<edges.length;i+=2){ const a=edges[i]|0, b=edges[i+1]|0; if (a<n&&b<n){ adj[a].push(b); adj[b].push(a) } }
+          const q=[0]; const vis=new Array(n).fill(false); vis[0]=true
+          while(q.length){ const u=q.shift()!; for(const v of adj[u]) if(!vis[v]){ vis[v]=true; level[v]=level[u]+1; q.push(v) } }
+        }
+        const maxL = level.reduce((a,b)=>Math.max(a,b),0)
+        let idx=0
+        for (let L=0; L<=Math.max(1,maxL); L++){
+          const ring = [] as number[]
+          for (let i=0;i<n;i++) if (level[i]===L) ring.push(i)
+          if (ring.length===0) continue
+          const R = 120 + L*180
+          for (let k=0;k<ring.length;k++,idx++){
+            const ang = (k / ring.length) * Math.PI * 2
+            target[ring[k]*2] = Math.cos(ang)*R
+            target[ring[k]*2+1] = Math.sin(ang)*R
+          }
+        }
+        // any not placed
+        for (let i=0;i<n;i++) if (target[i*2]===0 && target[i*2+1]===0 && i!==0){ const R=300+ (i%5)*80; const a=(i%360)*(Math.PI/180); target[i*2]=Math.cos(a)*R; target[i*2+1]=Math.sin(a)*R }
+      }
+      const placeHierarchy = ()=>{
+        const level = new Array<number>(n).fill(0)
+        const children: number[][] = Array.from({length:n},()=>[])
+        if (edges && edges.length>=2){
+          const adj: number[][] = Array.from({length:n},()=>[])
+          for (let i=0;i<edges.length;i+=2){ const a=edges[i]|0, b=edges[i+1]|0; if (a<n&&b<n){ adj[a].push(b); adj[b].push(a) } }
+          const q=[0]; const vis=new Array(n).fill(false); vis[0]=true
+          while(q.length){ const u=q.shift()!; for(const v of adj[u]) if(!vis[v]){ vis[v]=true; level[v]=level[u]+1; children[u].push(v); q.push(v) } }
+        }
+        const maxL = level.reduce((a,b)=>Math.max(a,b),0)
+        const layerGap = 180
+        for (let L=0; L<=Math.max(1,maxL); L++){
+          const nodesInLayer = [] as number[]
+          for (let i=0;i<n;i++) if (level[i]===L) nodesInLayer.push(i)
+          const W = Math.max(1, nodesInLayer.length)
+          for (let k=0;k<nodesInLayer.length;k++){
+            const i = nodesInLayer[k]
+            const x = (k - (W-1)/2) * 160
+            const y = L * layerGap
+            target[i*2] = x
+            target[i*2+1] = y
+          }
+        }
+      }
+      const placeConcentric = ()=>{
+        const rings = [120, 300, 480]
+        let idx=0
+        for (let r=0;r<rings.length;r++){
+          const ringCount = Math.min(n-idx, r===0?Math.min(12,n): r===1?Math.min(36, n-idx): (n-idx))
+          for (let i=0;i<ringCount;i++,idx++){
+            const ang = (i / Math.max(1,ringCount)) * Math.PI * 2
+            target[idx*2] = Math.cos(ang)*rings[r]
+            target[idx*2+1] = Math.sin(ang)*rings[r]
+          }
+        }
+        for (;idx<n;idx++){ const ang = (idx/Math.max(1,n))*Math.PI*2; target[idx*2]=Math.cos(ang)*600; target[idx*2+1]=Math.sin(ang)*600 }
+      }
+      if (mode==='grid') placeGrid(); else if (mode==='hierarchy') placeHierarchy(); else if (mode==='concentric') placeConcentric(); else placeRadial()
+      const duration = Math.max(120, Math.min(1200, opts?.ms || 520))
+      if (opts?.animate){
+        const start = performance.now()
+        const step = (now:number)=>{
+          const t = Math.min(1, (now - start)/duration)
+          const e = t<0.5 ? 2*t*t : -1 + (4 - 2*t)*t
+          const cur = new Float32Array(from.length)
+          for (let i=0;i<from.length;i++) cur[i] = from[i] + (target[i] - from[i]) * e
+          const next: any = { ...(tileRef.current as any) }
+          next.nodes = cur
+          setTile(next)
+          if (t < 1) requestAnimationFrame(step)
+        }
+        requestAnimationFrame(step)
+      } else {
+        const next: any = { ...(tileRef.current as any) }
+        next.nodes = target
+        setTile(next)
+      }
     }
   }), [])
 
@@ -266,11 +392,11 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
   }
 
   // Canvas logical size (CSS pixels) — avoids stale state during transitions
-  function getCanvasLogicalSize(){
+  function getCanvasLogicalSize(): { width:number, height:number }{
     const c = canvasRef.current
     if (!c) return { width: canvasSize.width, height: canvasSize.height }
     const r = c.getBoundingClientRect()
-    return { width: r.width || canvasSize.width, height: r.height || canvasSize.height }
+    return { width: (r.width as number) || canvasSize.width, height: (r.height as number) || canvasSize.height }
   }
 
   // Precise centering on a world coordinate, optionally animating scale as well
@@ -345,15 +471,15 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
     }
     
     console.log('fitToContent: Processing', nodes.length, 'nodes')
-    console.log('First 5 nodes:', nodes.slice(0, 5).map((n, i) => ({ 
+    console.log('First 5 nodes:', nodes.slice(0, 5).map((n: Node, i: number) => ({ 
       index: i, 
       x: n.x.toFixed(1), 
       y: n.y.toFixed(1),
       distance: Math.sqrt(n.x*n.x + n.y*n.y).toFixed(1)
     })))
     
-    const xs = nodes.map(n => n.x)
-    const ys = nodes.map(n => n.y)
+    const xs = nodes.map((n:Node) => n.x)
+    const ys = nodes.map((n:Node) => n.y)
     const minX = Math.min(...xs) - padding
     const maxX = Math.max(...xs) + padding
     const minY = Math.min(...ys) - padding
@@ -427,8 +553,9 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       const dx = world.x - node.x
       const dy = world.y - node.y
       // Use the same visual size for hit testing (convert pixels → world units)
-      const radiusPixels = Math.max(12, node.size * scale * 0.8)
-      const radiusWorld = radiusPixels / scale
+      const baseRadius = computeNodeRadius(node, scaleRef.current || 1)
+      const radiusPixels = baseRadius + 5
+      const radiusWorld = radiusPixels / (scaleRef.current || 1)
       if (dx * dx + dy * dy <= radiusWorld * radiusWorld) {
         return node
       }
@@ -454,26 +581,39 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       function drawEdge(ctx: CanvasRenderingContext2D, edge: Edge) {
         const sourceNode = nodes[edge.source]
         const targetNode = nodes[edge.target]
-        if (!sourceNode || !targetNode) return
+        if (!sourceNode || !targetNode || Number.isNaN(sourceNode.x) || Number.isNaN(targetNode.x)) return
         const A = worldToScreen(sourceNode.x, sourceNode.y)
         const B = worldToScreen(targetNode.x, targetNode.y)
-        ctx.strokeStyle = 'rgba(255, 165, 0, 0.35)'
-        ctx.lineWidth = 2
-        ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke()
-        // Score pill: use parsed weights if available
-        const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2
-        let score: number | null = null
-        if (tile && tile.edgeWeights && tile.edges) {
-          // Find matching edge index
-          for (let i = 0; i < tile.edges.length; i += 2) {
-            if (tile.edges[i] === edge.source && tile.edges[i + 1] === edge.target) {
-              const edgeIdx = i / 2
-              score = tile.edgeWeights[edgeIdx] || null
-              break
-            }
-          }
-        }
-        drawScorePill(ctx, String(score ?? ''), mx, my)
+        if (Number.isNaN(A.x) || Number.isNaN(B.x)) return
+
+        const leftToBridge = (sourceNode.group === 0 && targetNode.group === 1) || (sourceNode.group === 1 && targetNode.group === 0)
+        const rightToBridge = (sourceNode.group === 2 && targetNode.group === 1) || (sourceNode.group === 1 && targetNode.group === 2)
+        const bothBridge = sourceNode.group === 1 && targetNode.group === 1
+        let stroke = 'rgba(186, 188, 198, 0.16)'
+        if (leftToBridge) stroke = 'rgba(243, 93, 143, 0.28)'
+        else if (rightToBridge) stroke = 'rgba(74, 215, 209, 0.28)'
+        else if (bothBridge) stroke = 'rgba(255, 211, 105, 0.24)'
+
+        // Thicken bridge-to-bridge edges a bit more
+        const bridgeLink = bothBridge
+        const weight = Math.max(bridgeLink ? 0.2 : 0.08, Math.min(bridgeLink ? 1.4 : 0.9, edge.weight * (bridgeLink ? 0.18 : 0.10)))
+        ctx.strokeStyle = stroke
+        ctx.lineWidth = weight
+        ctx.beginPath()
+        ctx.moveTo(A.x, A.y)
+        const mx = (A.x + B.x) / 2
+        const my = (A.y + B.y) / 2
+        const hash = ((edge.source * 73856093) ^ (edge.target * 19349663)) >>> 0
+        const sign = (hash & 1) ? 1 : -1
+        const amplitude = 5 + (hash % 7)
+        const wobble = (((hash >> 4) % 1000) / 1000 - 0.5) * 3
+        const dx = B.y - A.y
+        const dy = A.x - B.x
+        const len = Math.hypot(dx, dy) || 1
+        const nx = (dx / len) * (amplitude + wobble) * sign
+        const ny = (dy / len) * (amplitude + wobble) * sign
+        ctx.quadraticCurveTo(mx + nx, my + ny, B.x, B.y)
+        ctx.stroke()
       }
 
       function drawScorePill(ctx: CanvasRenderingContext2D, text: string, x:number, y:number){
@@ -499,33 +639,25 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
 
   function drawNode(ctx: CanvasRenderingContext2D, node: Node) {
     const screen = worldToScreen(node.x, node.y)
-    const radius = Math.max(8, node.size * scale * 2) // Make nodes much larger and more visible
-    
+    if (Number.isNaN(screen.x) || Number.isNaN(screen.y)) return
+
+    const style = groupStyles[node.group as 0 | 1 | 2] || groupStyles[1]
+    const radius = computeNodeRadius(node, scale)
+
     ctx.save()
-    
-    // Debug: Draw a bright test circle first to ensure drawing works
     ctx.beginPath()
-    ctx.arc(screen.x, screen.y, radius + 5, 0, Math.PI * 2)
-    ctx.fillStyle = 'rgba(255, 0, 255, 0.2)' // Bright magenta for debugging
+    ctx.arc(screen.x, screen.y, radius + 1.6, 0, Math.PI * 2)
+    ctx.fillStyle = style.glow
     ctx.fill()
-    
-    // Outer glow
-    ctx.beginPath()
-    ctx.arc(screen.x, screen.y, radius + 3, 0, Math.PI * 2)
-    ctx.fillStyle = `rgba(255, 165, 0, 0.5)` // Increased visibility
-    ctx.fill()
-    
-    // Main node
+
     ctx.beginPath()
     ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2)
-    ctx.fillStyle = `rgba(255, 165, 0, 1.0)` // Full opacity
+    ctx.fillStyle = style.fill
     ctx.fill()
-    
-    // Border
-    ctx.strokeStyle = `rgba(255, 200, 0, 1.0)`
-    ctx.lineWidth = 2
+
+    ctx.strokeStyle = style.border
+    ctx.lineWidth = 1
     ctx.stroke()
-    
     ctx.restore()
   }
 
@@ -723,7 +855,8 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       if (vm && vm.length === nodes.length && !vm[i]) continue
       const node = nodes[i]
       const screen = worldToScreen(node.x, node.y)
-      let radius = Math.max(12, node.size * scale * 0.8) // People Network sizing
+      // Constant-size nodes: use computeNodeRadius (ignores scale)
+      let radius = computeNodeRadius(node, scale)
       try { if ((tile as any)?.compareOverlay && (i === 0 || i === 1)) radius = Math.max(radius, 18) } catch {}
       
       // Check if node is visible on screen
@@ -732,7 +865,7 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
         visibleNodes++
       }
       
-      // Draw node with clean styling — special colors for two centers in compare mode
+    // Draw node with clean styling — add labels for middle (bridges)
       ctx.save()
       let fill = `rgba(255, 165, 0, 0.9)`
       let glow = `rgba(255, 165, 0, 0.3)`
@@ -787,32 +920,15 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
       
       ctx.restore()
 
-      // Labels: require higher zoom to avoid clutter in compare mode
-      if (scale > 1.8 && labelsRef.current && labelsRef.current[i]){
-        drawLabel(ctx, labelsRef.current[i], screen.x, screen.y - radius - 12)
+      // Labels: always show bridge names; show side names when zoomed in
+      if (labelsRef.current && labelsRef.current[i]){
+        const isBridge = node.group === 1
+        const show = isBridge ? true : (scale > 1.6)
+        if (show) drawLabel(ctx, labelsRef.current[i], screen.x, screen.y - radius - 12)
       }
     }
     
-    // Debug logging every 60 frames (once per second at 60fps)
-    if (Math.random() < 0.016) { // ~1/60 chance
-      console.log('Draw debug:', {
-        totalNodes: nodes.length,
-        visibleNodes,
-        canvasSize: `${canvas.width}x${canvas.height}`,
-        transform: { tx, ty, scale },
-        firstNodeScreen: nodes.length > 0 ? worldToScreen(nodes[0].x, nodes[0].y) : null,
-        firstNodeWorld: nodes.length > 0 ? { x: nodes[0].x, y: nodes[0].y } : null
-      })
-      
-      // Log all node screen positions if we have few nodes
-      if (nodes.length > 0 && nodes.length <= 5) {
-        console.log('All node screen positions:', nodes.map((n, i) => ({
-          index: i,
-          world: { x: n.x, y: n.y },
-          screen: worldToScreen(n.x, n.y)
-        })))
-      }
-    }
+    // Debug logging disabled
     
     ctx.restore()
     
@@ -844,19 +960,25 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      const rect = canvas.getBoundingClientRect()
-      const mx = e.clientX - rect.left
-      const my = e.clientY - rect.top
-      const before = screenToWorld(mx, my)
-      // Faster zoom: increase sensitivity multiplier
-      const speed = 0.003; // was 0.001
-      const delta = -e.deltaY * speed
-      const newScale = Math.max(0.2, Math.min(3.5, scale * (1 + delta)))
-      setScale(newScale)
-      const sx = before.x * newScale + tx
-      const sy = before.y * newScale + ty
-      setTx(tx + (mx - sx))
-      setTy(ty + (my - sy))
+      const isZoomGesture = e.ctrlKey || e.metaKey || e.altKey
+      if (isZoomGesture) {
+        const rect = canvas.getBoundingClientRect()
+        const mx = e.clientX - rect.left
+        const my = e.clientY - rect.top
+        const before = screenToWorld(mx, my)
+        const speed = 0.006 // double zoom speed
+        const delta = -e.deltaY * speed
+        const newScale = Math.max(0.02, Math.min(3.5, scale * (1 + delta)))
+        setScale(newScale)
+        const sx = before.x * newScale + tx
+        const sy = before.y * newScale + ty
+        setTx(tx + (mx - sx))
+        setTy(ty + (my - sy))
+      } else {
+        // Two-finger swipe pans the canvas
+        setTx((prev: number) => prev - e.deltaX)
+        setTy((prev: number) => prev - e.deltaY)
+      }
       try { window.dispatchEvent(new CustomEvent('graph_pan', { detail: { tx: txRef.current, ty: tyRef.current }})) } catch {}
     }
 
@@ -921,11 +1043,10 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
           tile.nodes[dragging.index * 2] = dragging.x
           tile.nodes[dragging.index * 2 + 1] = dragging.y
         }
-        
-        console.log(`Dragged node ${dragging.index} to: x=${dragging.x.toFixed(1)}, y=${dragging.y.toFixed(1)}`)
+        // quiet drag spam
       } else if (isPanningRef.current) {
-        setTx(prev => prev + dx)
-        setTy(prev => prev + dy)
+        setTx((prev: number) => prev + dx)
+        setTy((prev: number) => prev + dy)
         try { window.dispatchEvent(new CustomEvent('graph_pan', { detail: { tx: txRef.current + dx, ty: tyRef.current + dy }})) } catch {}
       }
     }
@@ -944,9 +1065,9 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
         if (isTyping) return
       } catch {}
       if (e.key === '+' || e.key === '=') {
-        setScale(s => Math.min(3.5, s * 1.1))
+        setScale((s: number) => Math.min(3.5, s * 1.1))
       } else if (e.key === '-') {
-        setScale(s => Math.max(0.2, s * 0.9))
+        setScale((s: number) => Math.max(0.02, s * 0.9))
       } else if (e.key === 'r' || e.key === 'R') {
         console.log('R key pressed - fitting content')
         fitToContent()
@@ -957,7 +1078,12 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
         setTy(0)
         setScale(1)
       } else if (e.key === 'Escape') {
-        if (props.onClear) props.onClear()
+        if (tileRef.current) {
+          if (props.onClear) props.onClear();
+        } else if (trailRef.current.length > 0) {
+          trailRef.current = []
+        }
+        return;
       }
     }
 
@@ -994,6 +1120,27 @@ const CanvasScene = forwardRef<Exposed, Props>(function CanvasScene(props, ref) 
           pointerEvents:'auto'
         }} 
       />
+      {/* Simple overlay UI on the canvas */}
+      <div style={{ position:'absolute', bottom:118, left:14, right:14, zIndex: 21, display:'flex', flexDirection:'row', flexWrap:'wrap', gap:6, alignItems:'center' }}>
+        <button
+          onClick={()=>{ setShowBubbles((v: boolean)=>!v); setShowTestToast('Button pressed!'); setTimeout(()=> setShowTestToast(null), 900) }}
+          style={{ padding:'4px 8px', borderRadius:8, background:'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', backdropFilter:'blur(4px)', fontSize:12 }}
+        >
+          {showBubbles ? 'Hide' : 'Show'} Feature
+        </button>
+        {showTestToast && (
+          <div style={{ padding:'4px 6px', borderRadius:8, background:'rgba(10,10,20,0.70)', color:'#d5ffd5', border:'1px solid rgba(120,255,180,0.35)', fontSize:12 }}>
+            {showTestToast}
+          </div>
+        )}
+      </div>
+      {showBubbles && (
+        <div style={{ position:'absolute', inset:0, zIndex: 1, overflow:'hidden', pointerEvents:'none' }}>
+          <div style={{ position:'absolute', left:0, top:0, right:0, bottom:0 }}>
+            <AnimatedNetworkBubbles />
+          </div>
+        </div>
+      )}
     </div>
   )
 })

@@ -1,6 +1,4 @@
-const electron = require('electron')
-const app = electron && electron.app
-const BrowserWindow = electron && electron.BrowserWindow
+const { app, BrowserWindow } = require('electron')
 // Relax web security for demo speed; guard if app not ready
 try { if (app && app.commandLine) {
   app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors')

@@ -2,8 +2,10 @@ import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import LoginScene from "./graph/LoginScene";
+// UX demo removed
 
 function Root(){
+  const [view, setView] = useState<'app'>('app')
   const [connected, setConnected] = useState(false)
   const [blend, setBlend] = useState(false)
   const [dense, setDense] = useState<boolean>(()=>{
@@ -106,12 +108,15 @@ function Root(){
   }, [showLogin])
   return (
     <div style={{ position:'fixed', inset:0 }}>
+      {/* UX demo removed */}
       {/* Single persistent scene: acts as login when showLogin, becomes background after connect */}
       <LoginScene asBackground={!showLogin} dense={dense} palette={palette} brightness={brightness} showEdges={showEdges} edgeMultiplier={edgeMultiplier} fourCores={fourCores} nodeScale={nodeScale} edgeFraction={edgeFraction} edgeAlpha={edgeAlpha} sizeScale={sizeScale} rotSpeed={rotSpeed} edgeColor={edgeColor} sideHole={sideHole} sectorDensity={sectorDensity} bgPaused={bgPaused} bgRotSpeed={bgRotSpeed} syncKey="bg" onDone={()=>{ try{ sessionStorage.setItem('logged_in','1') }catch{}; setConnected(true); setBlend(true); setTimeout(()=>setBlend(false), 260); }} onConnect={()=>{ try{ sessionStorage.setItem('logged_in','1') }catch{}; setConnected(true); setBlend(true); setTimeout(()=>setBlend(false), 260); }} />
       {/* App on top */}
       <div style={{ position:'absolute', inset:0, opacity: (!showLogin || connected) ? 1 : (blend ? 1 : 0), transition:'opacity 260ms linear', pointerEvents: (!showLogin || connected) ? 'auto' : 'none' }}>
         <App />
       </div>
+      {/* Tiny entry to open demo without code churn */}
+      {/* Open UX Demo link removed */}
       {showLogin && (
         <div style={{ position:'absolute', left:0, right:0, bottom:0, zIndex:31, display:'flex', justifyContent:'center', pointerEvents:'none' }}>
           {!drawerOpen && (
