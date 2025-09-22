@@ -1088,3 +1088,82 @@ export async function fetchMigrationPairs(companyAId: string, companyBId: string
   return rows
 }
 
+// Company contacts function
+export async function companyContacts(companyName: string, opts?: { currentOnly?: boolean }) {
+  const s = (companyName || '').trim()
+  if (!s) return []
+  
+  const base = getApiBase()
+  
+  // Resolve to company id (string)
+  let cid: string | null = null
+  if (/^company:\d+$/i.test(s)) {
+    cid = s.replace(/^company:/i,'')
+  } else {
+    const rc = await resolveCompany(s)
+    if (rc && /^company:\d+$/.test(rc)) cid = rc.replace(/^company:/,'')
+  }
+  if (!cid) return []
+  
+  // Build contacts query: rank current stints first, then by most recent start/end; optional current-only filter; limit 25
+  const only = opts?.currentOnly === true
+  const buildSQL = (use64: boolean) => `
+    WITH base AS (
+      SELECT
+        toUInt64(${use64 ? 'person_id_64' : 'person_id'}) AS pid,
+        title,
+        start_date,
+        end_date,
+        seniority_bucket,
+        (end_date IS NULL) AS is_current,
+        greatest(
+          toDateTime64(ifNull(end_date, now()), 0),
+          toDateTime64(ifNull(start_date, now()), 0)
+        ) AS recent_ts
+      FROM via_test.stints
+      WHERE toUInt64(${use64 ? 'company_id_64' : 'company_id'}) = toUInt64(${cid})${only ? ` AND end_date IS NULL` : ``}
+    ), ranked AS (
+      SELECT
+        pid,
+        argMax(title, tuple(is_current, recent_ts)) AS title,
+        argMax(start_date, tuple(is_current, recent_ts)) AS start_date,
+        argMax(end_date, tuple(is_current, recent_ts)) AS end_date,
+        argMax(seniority_bucket, tuple(is_current, recent_ts)) AS seniority,
+        max(is_current) AS has_current,
+        max(recent_ts) AS recent_ts
+      FROM base
+      GROUP BY pid
+    )
+    SELECT
+      toString(r.pid) AS id,
+      anyLast(p.full_name) AS name,
+      r.title AS title,
+      toString(r.start_date) AS start_date,
+      toString(r.end_date) AS end_date,
+      toInt32(r.seniority) AS seniority,
+      anyLast(c.name) AS company
+    FROM ranked r
+    LEFT JOIN via_test.persons_large p ON p.person_id_64 = r.pid
+    LEFT JOIN via_test.companies c ON c.company_id_64 = toUInt64(${cid})
+    ORDER BY 
+      has_current DESC,
+      recent_ts DESC
+    LIMIT 25
+  `
+  const tryOnce = async (use64: boolean) => {
+    const sql = buildSQL(use64)
+    const url = `${base}/?query=${encodeURIComponent(sql)}&default_format=JSONEachRow`
+    const res = await fetch(url, { headers: { ...authHeaders() } })
+    const text = await res.text()
+    if (!res.ok) throw new Error(`companyContacts failed ${res.status}: ${text.slice(0,120)}`)
+    const lines = text.trim() ? text.trim().split('\n').filter(Boolean) : []
+    return lines
+  }
+  let lines = await tryOnce(true)
+  if (lines.length === 0) {
+    try { lines = await tryOnce(false) } catch {}
+  }
+  if (lines.length === 0) return []
+  try { return lines.map(l=>JSON.parse(l)) as Array<{ id: string, name: string, title: string|null, company: string|null, start_date?: string|null, end_date?: string|null, seniority?: number|null }> } catch { return [] }
+}
+
