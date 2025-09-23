@@ -36,10 +36,12 @@ const OP_SUGGESTIONS: Suggestion[] = [
 ]
 
 const ENTITY_STARTER: Suggestion[] = [
-  { id: 'entity-openai', type: 'entity', value: 'openai.com', label: 'openai.com', description: 'Company domain' },
-  { id: 'entity-google', type: 'entity', value: 'google.com', label: 'google.com', description: 'Company domain' },
-  { id: 'entity-me', type: 'entity', value: '@me', label: '@me', description: 'Current user / home node' },
-  { id: 'entity-list', type: 'entity', value: '#list:executive-talent', label: '#list:executive-talent', description: 'List or saved cohort' },
+  { id: 'person-randy-beck', type: 'entity', value: 'person:4686290173055902938', label: 'Randy Beck', description: 'Person id' },
+  { id: 'person-andrew-martin', type: 'entity', value: 'person:15772707043119431999', label: 'Andrew Martin', description: 'Person id' },
+  { id: 'entity-amazon', type: 'entity', value: 'company:2251329187646194655', label: 'Amazon.com Inc.', description: 'Company id' },
+  { id: 'entity-walmart', type: 'entity', value: 'company:14139580286565303534', label: 'Walmart Inc.', description: 'Company id' },
+  { id: 'entity-target', type: 'entity', value: 'company:618382097285902293', label: 'Target Corporation', description: 'Company id' },
+  { id: 'entity-jpm', type: 'entity', value: 'company:11145540422425190347', label: 'JPMorgan Chase & Co.', description: 'Company id' },
 ]
 
 const VIEW_SUGGESTIONS: Suggestion[] = [

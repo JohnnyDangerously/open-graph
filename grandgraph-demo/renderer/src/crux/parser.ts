@@ -504,6 +504,26 @@ export function parseExpression(text: string): Expression {
       }
     }
 
+    // Canonical IDs like company:123 or person:456 should be entities, not filters
+    const canonicalMatch = /^([A-Za-z]+):([^\s\^><|+&-]+)/.exec(rest)
+    if (canonicalMatch && (canonicalMatch[1].toLowerCase() === 'company' || canonicalMatch[1].toLowerCase() === 'person')) {
+      const full = canonicalMatch[0]
+      const prefix = canonicalMatch[1].toLowerCase()
+      const value = canonicalMatch[2]
+      idx += full.length
+      const tok: EntityToken = {
+        id: tokenId(),
+        type: 'entity',
+        entityKind: prefix === 'company' ? 'company' : 'person',
+        raw: text.slice(start, idx),
+        value: full,
+        start,
+        end: idx,
+      }
+      pushToken(tok)
+      continue
+    }
+
     // Filters key:value or key{json}
     const filterMatch = /^([A-Za-z_][A-Za-z0-9_.-]*)(:|\{)/.exec(rest);
     if (filterMatch) {

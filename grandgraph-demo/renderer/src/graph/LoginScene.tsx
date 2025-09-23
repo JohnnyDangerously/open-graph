@@ -338,7 +338,6 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       const w = canvas.clientWidth * dpr;
       const h = canvas.clientHeight * dpr;
       if (w <= 0 || h <= 0) {
-        console.warn('[resize] Skipping invalid dimensions', { w: canvas.clientWidth, h: canvas.clientHeight });
         return;
       }
       canvas.width = Math.max(1, Math.floor(w));
@@ -984,7 +983,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
             edgeCount = write2;
           }
           try { if (alive) edgeBuf.subdata(edgeData.subarray(0, edgeCount * 6)) } catch {}
-          try { if (!(window as any).__EDGE_LOGGED__) { (window as any).__EDGE_LOGGED__ = true; console.log('[edges] generated', edgeCount, 'thinned', 'of', MAX_EDGES, { isDense, showEdges, mult, M }); } } catch {}
+          try { if (!(window as any).__EDGE_LOGGED__) { (window as any).__EDGE_LOGGED__ = true; } } catch {}
         }
       }
       
@@ -1004,7 +1003,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
         canvas.removeEventListener('webglcontextrestored', onContextRestored as any, false)
       } catch {}
       if (reglRef.current) {
-        try { reglRef.current.destroy(); } catch (e) { console.error('[cleanup] destroy failed', e); }
+        try { reglRef.current.destroy(); } catch {}
       }
       reglRef.current = null;
       alive = false;
@@ -1243,4 +1242,3 @@ function Typewriter({ text }: { text: string }){
   const shown = text.slice(0, t)
   return <span>{shown}{blink ? <span style={{ opacity:0.9 }}>_</span> : <span style={{ opacity:0 }}>_</span>}</span>
 }
-

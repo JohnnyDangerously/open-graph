@@ -1,32 +1,23 @@
 import React from "react";
+import type { PersonProfile } from "../lib/api";
 
-export default function HUD({ focus, nodes, fps, selectedIndex, onSettings, onBack, onForward, canBack, canForward, onReshape }:{ focus: string | null, nodes: number, fps: number, selectedIndex?: number | null, onSettings: ()=>void, onBack: ()=>void, onForward: ()=>void, canBack:boolean, canForward:boolean, onReshape?: (mode:'hierarchy'|'radial'|'grid'|'concentric')=>void }){
+export default function HUD({ profile, profileOpen }:{ profile?: PersonProfile | null, profileOpen?: boolean }){
+  if (!profileOpen || !profile) return null
   return (
-    <div style={{ position:"absolute", bottom:156, left:14, right:14, zIndex:22, display:"flex", flexDirection:'row', flexWrap:'wrap', gap:6, alignItems:"center" }}>
-      <div style={{ padding:"4px 6px", background:"rgba(10,10,20,0.6)", border:"1px solid rgba(255,255,255,0.08)", borderRadius:8, color:"#9fb0ff", fontSize:12 }}>
-        Focus: <span style={{ color:"#fff" }}>{focus ?? "(none)"}</span>
-        {selectedIndex != null && selectedIndex >= 0 && (
-          <span style={{ marginLeft:8, color:'#ffc6f1' }}>Selected: #{selectedIndex}</span>
-        )}
+    <div style={{ position:'absolute', right:16, top:64, zIndex:50, width:360, background:'var(--dt-bg-elev-1)', border:'1px solid var(--dt-border)', borderRadius:12, color:'var(--dt-text)', boxShadow:'0 12px 36px rgba(0,0,0,0.45)' }}>
+      <div style={{ padding:'12px 14px', borderBottom:'1px solid var(--dt-border)' }}>
+        <div style={{ fontSize:16, fontWeight:700, color:'var(--dt-text)' }}>{profile.name || `person:${profile.id}`}</div>
+        <div style={{ fontSize:12, opacity:0.85, color:'var(--dt-text-dim)' }}>{[profile.current_title, profile.current_company_name].filter(Boolean).join(' @ ')}</div>
       </div>
-      <div style={{ padding:"4px 6px", background:"rgba(10,10,20,0.6)", border:"1px solid rgba(255,255,255,0.08)", borderRadius:8, color:"#9ff0c8", fontSize:12 }}>
-        {nodes} nodes • {fps.toFixed(0)} FPS
+      <div style={{ maxHeight:280, overflow:'auto', padding:'10px 14px', display:'grid', gap:8 }}>
+        {(profile.history||[]).slice(0,30).map((h, i)=> (
+          <div key={i} style={{ fontSize:12, background:'var(--dt-bg-elev-1)', border:'1px solid var(--dt-border)', borderRadius:8, padding:'8px 10px', color:'var(--dt-text)' }}>
+            <div style={{ fontWeight:600, color:'var(--dt-text)' }}>{h.title || '—'}</div>
+            <div style={{ opacity:0.9, color:'var(--dt-text-dim)' }}>{h.company || '—'}</div>
+            <div style={{ opacity:0.75, fontSize:11, color:'var(--dt-text-muted)' }}>{[h.start_date, h.end_date && h.end_date !== 'null' ? `→ ${h.end_date}` : '→ Present'].filter(Boolean).join(' ')}</div>
+          </div>
+        ))}
       </div>
-      <div style={{ display:'flex', gap:6 }}>
-        <button disabled={!canBack} onClick={onBack} style={{ padding:"4px 8px", borderRadius:8, background:"rgba(255,255,255,0.08)", color:"#fff", opacity:canBack?1:0.4, border:"1px solid rgba(255,255,255,0.15)", fontSize:12 }}>Back</button>
-        <button disabled={!canForward} onClick={onForward} style={{ padding:"4px 8px", borderRadius:8, background:"rgba(255,255,255,0.08)", color:"#fff", opacity:canForward?1:0.4, border:"1px solid rgba(255,255,255,0.15)", fontSize:12 }}>Forward</button>
-      </div>
-      {/* concentric toggle removed */}
-      {onReshape && (
-        <div style={{ display:'flex', gap:6, alignItems:'center', background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.15)', borderRadius:8, padding:4, flexWrap:'wrap' }}>
-          <span style={{ fontSize:11, color:'#ddd', opacity:0.9, padding:'0 6px' }}>Layout</span>
-          <button onClick={()=>onReshape('hierarchy')} style={{ padding:'2px 6px', borderRadius:6, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.12)', fontSize:11 }}>Hierarchy</button>
-          <button onClick={()=>onReshape('radial')} style={{ padding:'2px 6px', borderRadius:6, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.12)', fontSize:11 }}>Radial</button>
-          <button onClick={()=>onReshape('grid')} style={{ padding:'2px 6px', borderRadius:6, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.12)', fontSize:11 }}>Grid</button>
-          <button onClick={()=>onReshape('concentric')} style={{ padding:'2px 6px', borderRadius:6, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.12)', fontSize:11 }}>Concentric</button>
-        </div>
-      )}
-      <button onClick={onSettings} style={{ padding:"4px 8px", borderRadius:8, background:"rgba(255,255,255,0.08)", color:"#fff", border:"1px solid rgba(255,255,255,0.15)", whiteSpace:'nowrap', fontSize:12 }}>Settings</button>
     </div>
   )
 }

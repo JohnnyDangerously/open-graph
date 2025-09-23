@@ -1,3 +1,33 @@
 .drag-region { -webkit-app-region: drag; }
 .no-drag { -webkit-app-region: no-drag; }
 
+/* DevTools-inspired dark palette */
+:root {
+  /* Surfaces */
+  --dt-bg: rgb(36, 36, 36);           /* main window background */
+  --dt-bg-elev-1: rgb(36, 36, 36);    /* panels, cards */
+  --dt-bg-elev-2: rgb(36, 36, 36);    /* deep panels */
+  --dt-overlay: rgba(0,0,0,0.45);
+
+  /* Text */
+  --dt-text: #e8eaed;
+  --dt-text-dim: #c3c6d1;
+  --dt-text-muted: #9aa0a6;
+
+  /* Borders */
+  --dt-border: #3a3f45;
+  --dt-border-strong: #4b5159;
+
+  /* Accents (DevTools hues) */
+  --dt-accent: #66a0ff;       /* selection / buttons */
+  --dt-accent-2: #b07cff;     /* secondary accent */
+  --dt-accent-3: #4ce0b3;     /* success/ok */
+  --dt-warn: #ffc66a;         /* warning */
+  --dt-danger: #ff6b7f;       /* error */
+
+  /* Subtle fills */
+  --dt-fill-weak: rgba(255,255,255,0.06);
+  --dt-fill-med: rgba(255,255,255,0.10);
+  --dt-fill-strong: rgba(255,255,255,0.14);
+}
+

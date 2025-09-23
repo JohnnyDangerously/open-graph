@@ -66,8 +66,7 @@ export function parseTile(buf: ArrayBuffer): ParsedTile {
       }
     }
     return { nodes, size, alpha, group, count, edges, idsIndex, idsBlob, flags: _flags };
-  } catch (e) {
-    console.error('parseTile: failed, returning empty tile', e)
+  } catch {
     return { count: 0, nodes: new Float32Array(0), size: new Float32Array(0), alpha: new Float32Array(0), group: new Uint16Array(0), flags: new Uint8Array(0) } as any
   }
 }
@@ -97,12 +96,8 @@ export function makeDemoTile(numNeighbors = 800): ParsedTile {
 // JSON tile parser (supports two shapes: with meta.* or flat nodes/coords)
 export function parseJsonTile(j: any): ParsedTile {
   try {
-    console.log('parseJsonTile: Input JSON:', {
-      coordsNodesLength: j?.coords?.nodes?.length,
-      coordsEdgesLength: j?.coords?.edges?.length,
-      metaNodesLength: j?.meta?.nodes?.length
-    })
-
+    // Basic shape validation (non-throwing). Callers can also import validateJsonTileShape for detailed issues.
+    // We keep this lightweight here to avoid double work.
     const rawNodes: any[] = Array.isArray(j?.coords?.nodes) ? j.coords.nodes : []
     let count = Number.isInteger(rawNodes.length) ? rawNodes.length : 0
     if (count < 0) count = 0
@@ -154,15 +149,20 @@ export function parseJsonTile(j: any): ParsedTile {
     try {
       if (Array.isArray(j?.labels)) { (parsed as any).labels = j.labels }
     } catch {}
-    console.log('parseJsonTile: Parsed:', {
-      count: parsed.count,
-      nodesLength: parsed.nodes.length,
-      edgesLength: parsed.edges.length,
-      edgeWeightsLength: parsed.edgeWeights.length
-    })
     return parsed
-  } catch (err) {
-    console.error('parseJsonTile: Failed to parse, returning empty tile:', err)
+  } catch {
     return { count: 0, nodes: new Float32Array(0), size: new Float32Array(0), alpha: new Float32Array(0), group: new Uint16Array(0), edges: new Uint32Array(0), edgeWeights: new Float32Array(0) } as any
   }
+}
+
+// External validator for clearer error reporting
+export function validateJsonTileShape(j: any): { ok: boolean, issues: string[] } {
+  const issues: string[] = []
+  if (!Array.isArray(j?.coords?.nodes)) issues.push('coords.nodes missing/!array')
+  if (Array.isArray(j?.coords?.nodes) && j.coords.nodes.some((p:any)=>!Array.isArray(p)||typeof p[0]!=='number'||typeof p[1]!=='number')) issues.push('coords.nodes contains non-[x,y]')
+  if (j?.coords?.edges && !Array.isArray(j.coords.edges)) issues.push('coords.edges !array')
+  if (Array.isArray(j?.coords?.edges) && j.coords.edges.some((e:any)=>!Array.isArray(e)||typeof e[0]!=='number'||typeof e[1]!=='number')) issues.push('coords.edges contains non-[i,j]')
+  if (j?.labels && !Array.isArray(j.labels)) issues.push('labels !array')
+  if (j?.meta && !Array.isArray(j.meta?.nodes)) issues.push('meta.nodes !array')
+  return { ok: issues.length===0, issues }
 }

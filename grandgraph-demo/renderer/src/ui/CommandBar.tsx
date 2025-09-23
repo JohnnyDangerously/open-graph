@@ -6,34 +6,17 @@ import { getSuggestions } from "../crux/suggestions";
 
 import "./CommandBar.css";
 
-type Mode = "hierarchy" | "radial" | "grid" | "concentric";
-
 type CommandBarProps = {
   onRun: (expression: string, evaluation: EvaluationResult | null) => void | Promise<void>;
   placeholder?: string;
   focus?: string | null;
   selectedIndex?: number | null;
-  nodes?: number;
-  fps?: number;
-  onBack?: () => void;
-  onForward?: () => void;
-  canBack?: boolean;
-  canForward?: boolean;
-  onReshape?: (mode: Mode) => void;
   onSettings?: () => void;
   history?: HistoryEntry[];
-  quickExamples?: Array<{ label: string; expression: string }>;
   onPreview?: (evaluation: EvaluationResult | null) => void;
 };
 
 const DEBOUNCE_MS = 180;
-
-const defaultExamples: Array<{ label: string; expression: string }> = [
-  { label: "Bridge", expression: "google.com ^ openai.com > role:engineer time:24mo" },
-  { label: "Flows", expression: "google.com * acme.io > time:24mo" },
-  { label: "Compare", expression: "google.com >< openai.com > top:50" },
-  { label: "Reach", expression: "@me ↗ trust:80 hops:2" },
-];
 
 function classNames(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
@@ -51,23 +34,16 @@ const chipType = (token: Token): string => {
 };
 
 export default function CommandBar(props: CommandBarProps) {
+  const emptyHistoryRef = useRef<HistoryEntry[]>([]);
   const {
     onRun,
     placeholder,
     focus,
     selectedIndex,
-    nodes,
-    fps,
-    onBack,
-    onForward,
-    canBack,
-    canForward,
-    onReshape,
     onSettings,
-    history = [],
-    quickExamples = defaultExamples,
     onPreview,
   } = props;
+  const history = props.history ?? emptyHistoryRef.current;
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState("");
@@ -78,8 +54,14 @@ export default function CommandBar(props: CommandBarProps) {
   const [evaluation, setEvaluation] = useState<EvaluationResult | null>(null);
   const [evaluating, setEvaluating] = useState(false);
   const [warningsOpen, setWarningsOpen] = useState(false);
+  const [inputFocused, setInputFocused] = useState(false);
+  const lastEvaluatedRef = useRef<string>("");
 
   const expression = useMemo(() => parseExpression(value), [value]);
+  const activeToken = useMemo(() => {
+    const s = selectionStart;
+    return expression.tokens.find((tok) => s >= tok.start && s <= tok.end);
+  }, [expression, selectionStart]);
 
   useEffect(() => {
     const sugg = getSuggestions(expression, selectionStart, history);
@@ -87,34 +69,52 @@ export default function CommandBar(props: CommandBarProps) {
     setActiveSuggestion(0);
   }, [expression, selectionStart, history]);
 
+  // Listen for global inserts (e.g., graph node double-click)
   useEffect(() => {
-    if (!value.trim()) {
-      setEvaluation(null);
+    const onInsert = (e: Event) => {
+      try {
+        const detail = (e as CustomEvent)?.detail as { text?: string } | undefined
+        const text = (detail && typeof detail.text === 'string') ? detail.text : ''
+        if (!text) return
+        // Insert entity token at caret, pad appropriately
+        insertAtRange(text, selectionStart, selectionEnd, true)
+      } catch {}
+    }
+    window.addEventListener('crux_insert', onInsert as EventListener)
+    return () => window.removeEventListener('crux_insert', onInsert as EventListener)
+  }, [selectionStart, selectionEnd])
+
+  useEffect(() => {
+    const current = value.trim();
+    if (!current) {
+      if (evaluation !== null) setEvaluation(null);
+      if (evaluating) setEvaluating(false);
       onPreview?.(null);
       return;
     }
+    // Skip if we've already evaluated this exact string
+    if (current === lastEvaluatedRef.current) return;
     setEvaluating(true);
     const controller = new AbortController();
     const handle = window.setTimeout(async () => {
       try {
-        const result = await evaluate(value, { history, signal: controller.signal });
-        setEvaluation(result);
-        onPreview?.(result);
-        setEvaluating(false);
+        const result = await evaluate(current, { history, signal: controller.signal });
+        if (!controller.signal.aborted) {
+          lastEvaluatedRef.current = current;
+          setEvaluation(result);
+          setEvaluating(false);
+          onPreview?.(result);
+        }
       } catch (error: any) {
         if (error?.name === "AbortError") return;
-        console.warn("evaluate failed", error);
-        setEvaluation(null);
-        onPreview?.(null);
         setEvaluating(false);
       }
     }, DEBOUNCE_MS);
     return () => {
       controller.abort();
       window.clearTimeout(handle);
-      setEvaluating(false);
     };
-  }, [value, history, onPreview]);
+  }, [value, history]);
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const next = e.target.value;
@@ -128,6 +128,13 @@ export default function CommandBar(props: CommandBarProps) {
     setSelectionStart(target.selectionStart ?? 0);
     setSelectionEnd(target.selectionEnd ?? target.selectionStart ?? 0);
   };
+
+  // Intelligent suggestion visibility: only when input is focused, user has typed something,
+  // and caret is inside a token that we can complete. Hide when preview is open.
+  const showSuggestions = useMemo(() => {
+    if (!inputFocused) return false;
+    return suggestions.length > 0;
+  }, [inputFocused, suggestions]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "ArrowDown") {
@@ -217,10 +224,13 @@ export default function CommandBar(props: CommandBarProps) {
         result = await evaluate(trimmed, { history });
         setEvaluation(result);
       } catch (error: any) {
-        console.warn("evaluate execution failed", error);
+        // swallow evaluation errors; onRun will surface via err state upstream
       }
     }
     await onRun(trimmed, result ?? null);
+    // Hide suggestions after executing by removing focus from the input
+    try { inputRef.current?.blur(); } catch {}
+    setInputFocused(false);
     setWarningsOpen(false);
     setTimeout(() => {
       setValue("");
@@ -248,7 +258,7 @@ export default function CommandBar(props: CommandBarProps) {
   }, [evaluation]);
 
   return (
-    <div className="crux-shell">
+    <div className={classNames("crux-shell", showSuggestions && "has-suggestions")}>
       <div className="crux-topline">
         <div className="crux-focus-card">
           <div className="crux-focus-title">Focus</div>
@@ -257,14 +267,10 @@ export default function CommandBar(props: CommandBarProps) {
             <div className="crux-focus-foot">Selected #{selectedIndex}</div>
           )}
         </div>
-        {nodes != null && (
-          <div className="crux-stats">
-            {nodes.toLocaleString()} nodes {typeof fps === "number" ? `• ${Math.round(fps)} FPS` : ""}
-          </div>
-        )}
-        <div className="crux-nav">
-          {onBack && <button className="crux-nav-btn" onClick={onBack} disabled={!canBack}>Back</button>}
-          {onForward && <button className="crux-nav-btn" onClick={onForward} disabled={!canForward}>Forward</button>}
+        <div className="crux-top-buttons">
+          {onSettings && (
+            <button className="crux-top-button" onClick={onSettings}>Settings</button>
+          )}
         </div>
       </div>
 
@@ -279,15 +285,17 @@ export default function CommandBar(props: CommandBarProps) {
         <textarea
           ref={inputRef}
           value={value}
-          placeholder={placeholder || "google.com ^ openai.com > role:engineer time:24mo @view:graph"}
+          placeholder={placeholder || "person:<id> role:\"(engineer|software|sre)\" | person:<id> -> company:<id> role:\"(vp|director|chief|head)\" k:3 | bridges company:<id> + company:<id> | compare A + B"}
           onChange={handleChange}
+          onFocus={()=> setInputFocused(true)}
+          onBlur={()=> setInputFocused(false)}
           onSelect={handleSelect}
           onKeyDown={handleKeyDown}
           className={classNames("crux-input", evaluating && "crux-input-loading")}
-          rows={2}
+          rows={1}
         />
         {ghostCounts && <div className="crux-ghost-count">{ghostCounts}</div>}
-        {suggestions.length > 0 && (
+        {showSuggestions && (
           <div className="crux-suggestions">
             {suggestions.map((sugg, idx) => (
               <button
@@ -303,41 +311,13 @@ export default function CommandBar(props: CommandBarProps) {
         )}
       </div>
 
-      <PreviewCard
-        evaluation={evaluation}
-        evaluating={evaluating}
-        onToggleWarnings={() => setWarningsOpen((open) => !open)}
-        warningsOpen={warningsOpen}
-      />
-
-      <div className="crux-toolbar">
-        <div className="crux-example-row">
-          {quickExamples.map((ex) => (
-            <button key={ex.label} className="crux-pill" onClick={() => {
-              setValue(ex.expression);
-              requestAnimationFrame(() => {
-                const el = inputRef.current;
-                if (el) {
-                  el.focus();
-                  el.selectionStart = el.selectionEnd = ex.expression.length;
-                }
-              });
-            }}>
-              {ex.label}
-            </button>
-          ))}
-        </div>
-        {onReshape && (
-          <div className="crux-layout-switch">
-            <span>Layout</span>
-            <button onClick={() => onReshape("hierarchy")}>Hierarchy</button>
-            <button onClick={() => onReshape("radial")}>Radial</button>
-            <button onClick={() => onReshape("grid")}>Grid</button>
-            <button onClick={() => onReshape("concentric")}>Concentric</button>
-          </div>
-        )}
-        {onSettings && <button className="crux-settings" onClick={onSettings}>Settings</button>}
-      </div>
+      {evaluation && (
+        <PreviewCard
+          evaluation={evaluation}
+          onToggleWarnings={() => setWarningsOpen((open) => !open)}
+          warningsOpen={warningsOpen}
+        />
+      )}
     </div>
   );
 }
@@ -351,20 +331,11 @@ function prettyLabel(token: Token): string {
 
 type PreviewProps = {
   evaluation: EvaluationResult | null;
-  evaluating: boolean;
   warningsOpen: boolean;
   onToggleWarnings: () => void;
 };
 
-function PreviewCard({ evaluation, evaluating, warningsOpen, onToggleWarnings }: PreviewProps) {
-  if (evaluating) {
-    return (
-      <div className="crux-preview">
-        <div className="crux-preview-title">Synthesizing…</div>
-        <div className="crux-spinner" />
-      </div>
-    );
-  }
+function PreviewCard({ evaluation, warningsOpen, onToggleWarnings }: PreviewProps) {
   if (!evaluation || !evaluation.viewModel) {
     return (
       <div className="crux-preview crux-preview-empty">

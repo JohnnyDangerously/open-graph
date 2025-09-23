@@ -1,81 +1,33 @@
-import { cacheResolve, cacheTile } from './cache'
-import { store } from './store'
-import { resolvePerson, resolveCompany, fetchEgoBinary, fetchEgoClientJSON, fetchCompanyEgoJSON } from './lib/api'
-import { parseJsonTile, parseTile } from './graph/parse'
+import { fetchEgoClientJSON, fetchCompanyEgoJSON } from './lib/api'
+import { parseJsonTile, validateJsonTileShape } from './graph/parse'
+import { raise } from './lib/errors'
 
 export async function resolveSmart(q: string): Promise<string | null> {
-  const s = q.trim()
-  // Handle explicit prefixes but non-canonical payloads
-  if (/^person:/i.test(s)) {
-    const payload = s.slice('person:'.length).trim()
-    if (/^\d+$/.test(payload)) return `person:${payload}`
-    // Treat remainder as LinkedIn URL or name
-    const id = await resolvePerson(payload)
-    if (id) return id
-    return null
-  }
-  if (/^company:/i.test(s)) {
-    const payload = s.slice('company:'.length).trim()
-    if (/^\d+$/.test(payload)) return `company:${payload}`
-    const id = await resolveCompany(payload)
-    if (id) return id
-    return null
-  }
-  // LinkedIn URL direct
-  if (/linkedin\.com\/in\//i.test(s)) { const id = await resolvePerson(s); if (id) return id }
-  // Plain name/domain fallbacks
-  const p = await resolvePerson(s); if (p) return p
-  const c = await resolveCompany(s); if (c) return c
-  const cached = await cacheResolve(s); if (cached) return cached
+  const s = (q || '').trim()
+  if (/^person:\d+$/i.test(s)) return `person:${s.slice(s.indexOf(':') + 1)}`
+  if (/^company:\d+$/i.test(s)) return `company:${s.slice(s.indexOf(':') + 1)}`
   return null
 }
 
 export async function loadTileSmart(key: string) {
-  // Company: go straight to JSON builder. Person: prefer JSON first (richer 1st/2nd-degree), then binary fallback.
-  if (key.startsWith('company:')) {
-    const j = await fetchCompanyEgoJSON(key, 1500)
-    const tile = parseJsonTile(j)
-    if (tile && (j.meta?.nodes?.length)) {
-      const labels = new Array(tile.count)
-      for (let i=0;i<tile.count;i++){
-        const n = j.meta.nodes[i] || {}
-        labels[i] = (n.full_name || n.name || n.id || `#${i}`)
-      }
-      ;(tile as any).labels = labels
+  const s = (key || '').trim()
+  if (/^company:\d+$/.test(s)) {
+    const payload: any = await fetchCompanyEgoJSON(s, 1500)
+    const shape = validateJsonTileShape(payload)
+    if (!shape.ok) {
+      raise('STEP_5_TILE', 'BAD_TILE', 'Company tile shape invalid', { issues: shape.issues })
     }
+    const tile = parseJsonTile(payload)
     return { tile }
   }
-  // Person flow — JSON first for real 1st/2nd-degree graph
-  try {
-    const j = await fetchEgoClientJSON(key, 1500)
+  if (/^person:\d+$/.test(s)) {
+    const j = await fetchEgoClientJSON(s, 1500)
+    const shape = validateJsonTileShape(j)
+    if (!shape.ok) {
+      raise('STEP_5_TILE', 'BAD_TILE', 'Person tile shape invalid', { issues: shape.issues })
+    }
     const tile = parseJsonTile(j)
-    if (tile && (j.meta?.nodes?.length)) {
-      const labels = new Array(tile.count)
-      for (let i=0;i<tile.count;i++){
-        const n = j.meta.nodes[i] || {}
-        labels[i] = (n.full_name || n.name || n.id || `#${i}`)
-      }
-      ;(tile as any).labels = labels
-    }
     return { tile }
-  } catch (error) {
-    console.warn('loadTileSmart: JSON path failed, trying binary:', error)
   }
-  try {
-    console.log('loadTileSmart: trying fetchEgoBinary for key:', key)
-    const b = await fetchEgoBinary(key, 1500) as any
-    if (b && b.buf) {
-      const tile = parseTile(b.buf)
-      if (b.labels && Array.isArray(b.labels)) (tile as any).labels = b.labels
-      if (b.meta && b.meta.nodes) (tile as any).meta = { nodes: b.meta.nodes }
-      console.log('loadTileSmart: Parsed binary tile:', { count: tile.count, edges: tile.edges?.length })
-      return { tile }
-    }
-  } catch (e) {
-    console.error('loadTileSmart: binary path failed as well:', e)
-  }
-  // Fallback to cache
-  const c = await cacheTile(key)
-  if (!c) throw new Error('ego not found (backend+cache)')
-  return 'json' in c ? { tile: parseJsonTile(c.json) } : { tile: parseTile(c.buf) }
+  throw new Error('Key must be canonical company:<id> or person:<id>')
 }

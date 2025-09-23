@@ -117,6 +117,44 @@ const CosmoScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function CosmoS
           zoomLevel={1}
           fitView
           onNodeClick={(node: CosmoNode) => props.onPick?.(node.id)}
+          onNodeDoubleClick={(node: CosmoNode) => {
+            try {
+              const idx = node.id
+              const t: any = tile as any
+              let rawId: string | null = null
+              try {
+                const metaNode = t?.meta?.nodes?.[idx]
+                if (metaNode && (metaNode.id != null || metaNode.linkedin_id != null || metaNode.handle != null)) {
+                  rawId = String(metaNode.id ?? metaNode.linkedin_id ?? metaNode.handle)
+                }
+              } catch {}
+              if (!rawId) {
+                try {
+                  const lbl = (t?.labels && Array.isArray(t.labels)) ? t.labels[idx] : null
+                  if (lbl && /^(company|person):\d+$/i.test(lbl)) rawId = lbl
+                } catch {}
+              }
+              if (!rawId) return
+              const mode = t?.meta?.mode as string | undefined
+              const grp = (Array.isArray((t as any)?.group) ? (t as any).group[idx] : (t as any)?.group?.[idx])
+              let canonical = rawId
+              if (/^(company|person):\d+$/i.test(rawId)) {
+                canonical = rawId.toLowerCase()
+              } else if (/^\d+$/.test(rawId)) {
+                if (mode === 'graph') {
+                  canonical = (grp === 1) ? `person:${rawId}` : `company:${rawId}`
+                } else if (mode === 'person') {
+                  canonical = `person:${rawId}`
+                } else if (mode === 'flows') {
+                  canonical = (idx === 0 || idx === 1) ? `company:${rawId}` : ''
+                } else {
+                  canonical = `person:${rawId}`
+                }
+              }
+              if (!canonical) return
+              window.dispatchEvent(new CustomEvent('crux_insert', { detail: { text: canonical } }))
+            } catch {}
+          }}
         />
       ) : null}
     </div>

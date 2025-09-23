@@ -1,19 +1,33 @@
 import React, { useRef, useState, useEffect, useMemo } from "react";
+import { MIN_OVERLAP_MONTHS } from "./lib/constants";
 import CanvasScene from "./graph/CanvasScene";
 import CosmoScene from "./graph/CosmoScene";
 import CommandBar from "./ui/CommandBar";
 import HUD from "./ui/HUD";
+import { fetchPersonProfile, type PersonProfile } from "./lib/api";
 import Settings from "./ui/Settings";
 import Sidebar from "./ui/Sidebar";
-import { setApiConfig, fetchBridgesTileJSON } from "./lib/api";
+import { setApiConfig, fetchBridgesTileJSON, fetchAvatarMap } from "./lib/api";
+import { fetchIntroPaths, type IntroPathsResult, fetchNearbyExecsAtCompany, fetchNetworkByFilter } from "./lib/api";
 import { resolveSmart, loadTileSmart } from "./smart";
 // demo modules removed
 import type { ParsedTile } from "./graph/parse";
 import { parseJsonTile } from "./graph/parse";
 import type { GraphSceneHandle } from "./graph/types";
-import type { EvaluationResult, HistoryEntry as CommandHistoryEntry, Token as CruxToken, OperatorToken as CruxOperatorToken } from "./crux/types";
+import type {
+  EvaluationResult,
+  FilterToken as CruxFilterToken,
+  OperatorToken as CruxOperatorToken,
+  EntityToken as CruxEntityToken,
+} from "./crux/types";
 
 type SceneRef = GraphSceneHandle;
+
+type RunOptions = {
+  pushHistory?: boolean;
+  overrideMove?: { x: number; y: number };
+  turnRadians?: number;
+};
 
 export default function App(){
   const [focus, setFocus] = useState<string | null>(null);
@@ -21,19 +35,17 @@ export default function App(){
   const sceneRef = useRef<SceneRef | null>(null);
   const latestTileRef = useRef<ParsedTile | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [fps, setFps] = useState(60);
   const [nodeCount, setNodeCount] = useState(0);
   const [labels, setLabels] = useState<string[]>([]);
   const [metaNodes, setMetaNodes] = useState<Array<{ id?: string|number, title?: string|null }>>([]);
   const [jobFilter, setJobFilter] = useState<string | null>(null)
   const [avatars, setAvatars] = useState<string[]>([]);
   const [history, setHistory] = useState<Array<{ id: string, move?: { x:number, y:number }, turn?: number, at?: number }>>([]);
-  const [commandHistory, setCommandHistory] = useState<CommandHistoryEntry[]>([]);
   const [cursor, setCursor] = useState(-1);
   // filters removed
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [apiBase, setApiBase] = useState<string>(()=>{
-    try { return localStorage.getItem('API_BASE') || "http://34.192.99.41" } catch { return "http://34.192.99.41" }
+    try { return localStorage.getItem('API_BASE_URL') || "http://34.236.80.1:8123" } catch { return "http://34.236.80.1:8123" }
   });
   const [bearer, setBearer] = useState<string>(()=>{
     try { return localStorage.getItem('API_BEARER') || "" } catch { return "" }
@@ -47,22 +59,50 @@ export default function App(){
   const [compareGroups, setCompareGroups] = useState<null | { left:number[], right:number[], overlap:number[] }>(null)
   const lastCompareIdsRef = useRef<{ a:string, b:string } | null>(null)
   const [rendererMode, setRendererMode] = useState<'canvas' | 'cosmograph'>('canvas')
+  const [profile, setProfile] = useState<PersonProfile | null>(null)
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [introPathsResult, setIntroPathsResult] = useState<IntroPathsResult | null>(null)
+  const [introPathsTileMask, setIntroPathsTileMask] = useState<boolean[] | null>(null)
+  const [selectedPathIndex, setSelectedPathIndex] = useState<number | null>(null)
+  const [nearbyExecs, setNearbyExecs] = useState<Array<{ person_id:string, title?:string|null, seniority?:string|null, months_overlap:number }>>([])
+  const runIdRef = useRef(0)
 
   const handleSceneRef = (instance: SceneRef | null) => {
     sceneRef.current = instance
   }
 
+  // Keep API module in sync with UI state on mount and whenever values change
+  useEffect(() => {
+    try { setApiConfig(apiBase, bearer) } catch {}
+  }, [apiBase, bearer])
+
+  // Migrate old/stale API base values to the new host automatically
+  useEffect(() => {
+    try {
+      const cur = (localStorage.getItem('API_BASE_URL') || '').trim()
+      const needsUpdate = /34\.192\.99\.41/.test(cur) || /127\.0\.0\.1/.test(cur)
+      if (needsUpdate) {
+        const next = 'http://34.236.80.1:8123'
+        localStorage.setItem('API_BASE_URL', next)
+        setApiBase(next)
+        setApiConfig(next, bearer)
+      }
+    } catch {}
+  // run once on mount
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   useEffect(() => {
     if (sceneRef.current && latestTileRef.current) {
       try {
         sceneRef.current.setForeground(latestTileRef.current, { noTrailSnapshot: true })
-      } catch (e) {
-        console.warn('Failed to reapply tile on renderer swap', e)
-      }
+      } catch {}
     }
   }, [rendererMode])
 
   const visibleMask = useMemo(() => {
+    // If Intro Paths selection mask is active, prioritize it
+    if (introPathsTileMask && introPathsTileMask.length) return introPathsTileMask
     if (!metaNodes || jobFilter === null || jobFilter.trim() === '') return null
     const q = jobFilter.toLowerCase()
     return metaNodes.map((m, idx) => {
@@ -70,13 +110,696 @@ export default function App(){
       const title = (m?.title || '').toLowerCase()
       return title.includes(q)
     })
-  }, [metaNodes, jobFilter])
+  }, [metaNodes, jobFilter, introPathsTileMask])
 
   // demo resize removed
 
   // demo triples removed
 
-  async function run(cmd: string, opts?: { pushHistory?: boolean, overrideMove?: { x:number, y:number }, turnRadians?: number }){
+  const ensureCompanyId = async (input: string): Promise<string> => {
+    const trimmed = (input ?? '').trim()
+    if (!trimmed) throw new Error('Company value required for bridges')
+    if (/^company:\d+$/i.test(trimmed)) return `company:${trimmed.slice(trimmed.indexOf(':') + 1)}`
+    if (/^\d+$/.test(trimmed)) return `company:${trimmed}`
+    throw new Error('Provide canonical company:<id> (numeric)')
+  }
+
+  const ensureEntityId = async (input: string): Promise<string> => {
+    const trimmed = (input ?? '').trim()
+    if (!trimmed) throw new Error('Entity value required')
+    const m = /^(company|person):([0-9]+)$/i.exec(trimmed)
+    if (m) return `${m[1].toLowerCase()}:${m[2]}`
+    if (/^\d+$/.test(trimmed)) return `person:${trimmed}`
+    throw new Error('Provide canonical person:<id> or company:<id> (numeric)')
+  }
+
+  // --- Intro Paths: tile builder and command ---
+  function buildIntroPathsTile(result: IntroPathsResult){
+    // Build 3-row layout: Start (S) at top, Bridges (unique Ms from top paths) middle, Targets (unique Ts from top paths) bottom
+    const uniqueM = Array.from(new Set(result.top3.map(p=>p.M)))
+    const uniqueT = Array.from(new Set(result.top3.map(p=>p.T)))
+    const mCount = Math.min(10, uniqueM.length || result.Ms.length)
+    const tCount = Math.min(10, uniqueT.length || result.Ts.length)
+    const ms = (uniqueM.length ? uniqueM : result.Ms.map(m=>m.id)).slice(0, mCount)
+    const ts = (uniqueT.length ? uniqueT : result.Ts.map(t=>t.id)).slice(0, tCount)
+
+    const count = 1 + ms.length + ts.length
+    const nodes = new Float32Array(count * 2)
+    const size = new Float32Array(count)
+    const alpha = new Float32Array(count)
+    const group = new Uint16Array(count)
+    const labelsLocal: string[] = new Array(count)
+    const metaLocal: Array<Record<string, unknown>> = new Array(count)
+
+    // Positions
+    const yTop = -280, yMid = 0, yBot = 280
+    // Center S
+    nodes[0] = 0; nodes[1] = yTop; size[0] = 16; alpha[0] = 1; group[0] = 0
+    labelsLocal[0] = introPathsResult?.paths?.[0]?.names?.S || result.S
+    metaLocal[0] = { id: result.S, name: labelsLocal[0], group: 0 }
+
+    const placeRow = (ids: string[], startIndex: number, y: number, groupValue: number, names: Map<string, string|undefined>) => {
+      const n = ids.length
+      const spacing = Math.max(80, Math.min(260, Math.floor(800 / Math.max(1, n))))
+      const total = (n - 1) * spacing
+      for (let k=0;k<n;k++){
+        const i = startIndex + k
+        const x = -total/2 + k * spacing
+        nodes[i*2] = x
+        nodes[i*2+1] = y
+        size[i] = 9
+        alpha[i] = 0.96
+        group[i] = groupValue
+        const id = ids[k]
+        const label = names.get(id) || id
+        labelsLocal[i] = label as string
+        metaLocal[i] = { id, name: label, group: groupValue }
+      }
+    }
+
+    // Name maps
+    const mNames = new Map<string, string|undefined>()
+    result.Ms.forEach(m=>{ if (!mNames.has(m.id)) mNames.set(m.id, (m as any).name) })
+    const tNames = new Map<string, string|undefined>()
+    result.Ts.forEach(t=>{ if (!tNames.has(t.id)) tNames.set(t.id, (t as any).name) })
+
+    // Place rows
+    placeRow(ms, 1, yMid, 1, mNames)
+    placeRow(ts, 1 + ms.length, yBot, 2, tNames)
+
+    // Build edges for Top-3 only
+    const edgesArr: Array<[number, number]> = []
+    const weights: number[] = []
+    const idToIndex = (id: string): number => {
+      const idxM = ms.indexOf(id); if (idxM >= 0) return 1 + idxM
+      const idxT = ts.indexOf(id); if (idxT >= 0) return 1 + ms.length + idxT
+      return -1
+    }
+    const usedPairs = new Set<string>()
+    for (const p of result.top3){
+      const mIdx = idToIndex(p.M)
+      const tIdx = idToIndex(p.T)
+      if (mIdx === -1 || tIdx === -1) continue
+      const key = `${mIdx}->${tIdx}`
+      if (usedPairs.has(key)) continue
+      usedPairs.add(key)
+      // S->M edge
+      edgesArr.push([0, mIdx])
+      weights.push(Math.max(1, Math.round(p.scores.R_SM * 10)))
+      // M->T edge
+      edgesArr.push([mIdx, tIdx])
+      weights.push(Math.max(1, Math.round(p.scores.R_MT * 10)))
+    }
+
+    const edges = new Uint16Array(edgesArr.length * 2)
+    const edgeWeights = new Float32Array(weights.length)
+    for (let i=0;i<edgesArr.length;i++){
+      edges[i*2] = edgesArr[i][0]; edges[i*2+1] = edgesArr[i][1]; edgeWeights[i] = weights[i]
+    }
+
+    const tile: ParsedTile & { labels?: string[], meta?: { nodes: Array<Record<string, unknown>> } } = {
+      count,
+      nodes,
+      size,
+      alpha,
+      group,
+      edges,
+      edgeWeights,
+    } as any
+    ;(tile as any).labels = labelsLocal
+    ;(tile as any).meta = { nodes: metaLocal }
+    ;(tile as any).focusWorld = { x: 0, y: yMid }
+    return { tile, ms, ts }
+  }
+
+  const executeIntroPathsCommand = async (params: { S: string, company: string, icp?: string, k?: number, minRMT?: number }) => {
+    const SId = await ensureEntityId(params.S)
+    const CId = await ensureCompanyId(params.company)
+    const result = await fetchIntroPaths({ S: SId, companyId: CId, icpRegex: params.icp, k: params.k, minRMT: params.minRMT })
+    setIntroPathsResult(result)
+    const built = buildIntroPathsTile(result)
+    latestTileRef.current = built.tile as ParsedTile
+    setErr(null)
+    setLabels((built.tile as any).labels || [])
+    setMetaNodes(((built.tile as any).meta?.nodes || []) as any)
+    try { const meta = (built.tile as any).meta?.nodes || []; console.log('Meta(nodes) sample (intro paths):', meta.slice(0,6).map((n:any)=>({ id:n?.id, person_id:n?.person_id, person_id_str:n?.person_id_str, linkedin:n?.linkedin }))) } catch {}
+    // Reset selection/masks
+    setSelectedPathIndex(null)
+    setIntroPathsTileMask(null)
+    setNearbyExecs([])
+    sceneRef.current?.setForeground(built.tile as any)
+    setFocus(`Intro Paths: ${result.S} → company:${result.companyId}`)
+    try { (sceneRef.current as any)?.focusIndex?.(0, { animate: true, ms: 480, zoom: 1.4 }) } catch {}
+    return { SId, CId, result, built }
+  }
+
+  type OperatorContext = {
+    left: string | null
+    right: string | null
+    filters: Record<string, string>
+  }
+
+  const extractOperatorEntities = (
+    expression: EvaluationResult['expression'] | undefined,
+    ops: Array<CruxOperatorToken['op']>
+  ): OperatorContext => {
+    const tokens = expression?.tokens ?? []
+    const filters: Record<string, string> = {}
+    let left: string | null = null
+    let right: string | null = null
+
+    const opIndex = tokens.findIndex(
+      (tok) => tok.type === 'operator' && ops.includes((tok as CruxOperatorToken).op)
+    )
+
+    if (opIndex !== -1) {
+      for (let i = opIndex - 1; i >= 0; i--) {
+        const tok = tokens[i]
+        if (tok.type === 'entity' || tok.type === 'macro-ref') {
+          const entityTok = tok as CruxEntityToken
+          const metaCanonical = typeof (entityTok.meta as any)?.canonical === 'string'
+            ? (entityTok.meta as any).canonical
+            : null
+          left = metaCanonical || entityTok.value?.trim() || entityTok.raw.trim()
+          break
+        }
+      }
+      for (let i = opIndex + 1; i < tokens.length; i++) {
+        const tok = tokens[i]
+        if (tok.type === 'entity' || tok.type === 'macro-ref') {
+          const entityTok = tok as CruxEntityToken
+          const metaCanonical = typeof (entityTok.meta as any)?.canonical === 'string'
+            ? (entityTok.meta as any).canonical
+            : null
+          right = metaCanonical || entityTok.value?.trim() || entityTok.raw.trim()
+          break
+        }
+      }
+    }
+
+    for (const token of tokens) {
+      if (token.type === 'filter') {
+        const filter = token as CruxFilterToken
+        const key = filter.key?.toLowerCase()
+        if (key) filters[key] = filter.valueRaw.trim()
+      }
+    }
+
+    return { left, right, filters }
+  }
+
+  const executeBridgeCommand = async (params: { left: string; right: string; limit?: number; focusLabel?: string }) => {
+    const rid = ++runIdRef.current
+    const leftId = await ensureCompanyId(params.left)
+    const rightId = await ensureCompanyId(params.right)
+    const limit = Number.isFinite(params.limit) && params.limit ? Math.max(10, Math.floor(params.limit)) : 180
+    const payload = await fetchBridgesTileJSON(leftId, rightId, limit)
+    if (rid !== runIdRef.current) return { tile: undefined as any, leftId, rightId, payload } as any
+    const tile = parseJsonTile(payload as any)
+    latestTileRef.current = tile as ParsedTile
+    setErr(null)
+
+    const meta = Array.isArray((payload as any)?.meta?.nodes) ? (payload as any).meta.nodes : []
+    setMetaNodes(meta as any)
+    try { console.log('Meta(nodes) sample (bridges):', (meta||[]).slice(0,6).map((n:any)=>({ id:n?.id, person_id:n?.person_id, person_id_str:n?.person_id_str, linkedin:n?.linkedin }))) } catch {}
+
+    const groups = Array.isArray((payload as any)?.coords?.groups) ? (payload as any).coords.groups : []
+    const labelsIn = Array.isArray((payload as any)?.labels) ? (payload as any).labels as string[] : undefined
+
+    const decorateLabels = (labelsSource: string[] | undefined): string[] | undefined => {
+      if (!Array.isArray(labelsSource)) return undefined
+      try {
+        return labelsSource.map((lab, i) => {
+          const node = meta?.[i] ?? {}
+          const groupValue = typeof groups?.[i] === 'number' ? groups?.[i] : typeof node?.group === 'number' ? node.group : undefined
+          if (groupValue === 1) {
+            const score = typeof node?.score === 'number' ? node.score : undefined
+            const leftDegree = typeof node?.left_degree === 'number' ? node.left_degree : undefined
+            const rightDegree = typeof node?.right_degree === 'number' ? node.right_degree : undefined
+            const scorePart = typeof score === 'number' && Number.isFinite(score) ? ` • overlap ${Math.round(score)}m` : ''
+            const degreePart = (Number.isFinite(leftDegree) || Number.isFinite(rightDegree))
+              ? ` • L:${Math.max(0, Number(leftDegree || 0))} R:${Math.max(0, Number(rightDegree || 0))}`
+              : ''
+            return `${lab}${scorePart}${degreePart}`.trim()
+          }
+          return lab
+        })
+      } catch {
+        return labelsSource
+      }
+    }
+
+    const fallbackLabels = meta.map((node: any, idx: number) => (
+      node?.full_name || node?.name || node?.title || (labelsIn?.[idx]) || String(node?.id ?? `#${idx}`)
+    ))
+    const nextLabels = decorateLabels(labelsIn) || labelsIn || fallbackLabels
+    setLabels(nextLabels)
+
+    // Avatar assignment priority: explicit url -> ClickHouse avatar -> LinkedIn (no DiceBear)
+    const explicit = new Array(tile.count).fill(null as string | null).map((_, i)=>{
+      const node = meta?.[i] ?? {}
+      const u = (node?.avatar_url || node?.avatarUrl) as string | undefined
+      return (u && typeof u === 'string') ? u : null
+    })
+    const idsForLookup = meta.map((n:any)=> String(n?.id ?? n?.person_id ?? '')).filter(Boolean)
+    let chMap = new Map<string,string>()
+    try {
+      if (idsForLookup.length) {
+        console.log('AvatarMap(graph) request ids sample:', idsForLookup.slice(0,10))
+        chMap = await fetchAvatarMap(idsForLookup)
+        try { console.log('AvatarMap(graph): ids', idsForLookup.length, 'mapped', chMap.size, 'sample', Array.from(chMap.entries()).slice(0,4)) } catch {}
+      }
+    } catch (e) { console.warn('AvatarMap(graph) failed', e) }
+    const avatars = new Array(tile.count).fill('').map((_, i) => {
+      const node = meta?.[i] ?? {}
+      const exp = explicit[i]
+      if (exp) return exp
+      const keyA = String(node?.id ?? '')
+      const keyB = String(node?.person_id ?? '')
+      let fromCH = ''
+      if (keyA && chMap.has(keyA)) fromCH = chMap.get(keyA) || ''
+      else if (keyB && chMap.has(keyB)) fromCH = chMap.get(keyB) || ''
+      if (fromCH) return fromCH
+      return ''
+    })
+    setAvatars(avatars)
+    try {
+      if ((tile as any)?.meta?.nodes) {
+        (tile as any).meta.mode = 'graph'
+        ;(tile as any).meta.nodes.forEach((n:any, idx:number)=>{ const u = avatars[idx]; if (u) n.avatar_url = u })
+        // Ensure labels/meta get pushed with avatar urls for CanvasScene consumption
+        latestTileRef.current = tile as any
+      }
+    } catch {}
+
+    const deriveFocusLabel = (): string => {
+      const anchorName = (node: any) => node?.full_name || node?.name || node?.company || node?.id
+      const leftName = anchorName(meta?.[0]) || leftId
+      const rightName = anchorName(meta?.[1]) || rightId
+      return params.focusLabel || `Bridges: ${leftName} ↔ ${rightName}`
+    }
+    setFocus(deriveFocusLabel())
+
+    setCompareGroups(null)
+    setSidebarIndices(null)
+    setSelectedRegion(null)
+
+    if (rid === runIdRef.current) sceneRef.current?.setForeground(tile as any)
+    return { tile, leftId, rightId, payload }
+  }
+
+  const getBridgeContextFromExpression = (expression: EvaluationResult['expression']) => {
+    const { left, right, filters } = extractOperatorEntities(expression, ['^', 'bridge'])
+    const parsedLimit = filters.top ? parseInt(filters.top.replace(/[^0-9]/g, ''), 10) : undefined
+    return { left, right, limit: Number.isFinite(parsedLimit) && parsedLimit ? parsedLimit : undefined }
+  }
+
+  const getCompareContextFromExpression = (expression: EvaluationResult['expression']) => {
+    return extractOperatorEntities(expression, ['><', 'compare'])
+  }
+
+  const getMigrationContextFromExpression = (expression: EvaluationResult['expression']) => {
+    const context = extractOperatorEntities(expression, ['*', 'migration'])
+    const limit = context.filters.top ? parseInt(context.filters.top.replace(/[^0-9]/g, ''), 10) : undefined
+    const timeFilter = context.filters.time || context.filters.window || ''
+    const months = (() => {
+      if (!timeFilter) return undefined
+      const num = parseInt(timeFilter.replace(/[^0-9]/g, ''), 10)
+      return Number.isFinite(num) && num > 0 ? num : undefined
+    })()
+    const since = context.filters.since?.trim() || undefined
+    const until = context.filters.until?.trim() || undefined
+    return {
+      left: context.left,
+      right: context.right,
+      limit: Number.isFinite(limit) && limit ? limit : undefined,
+      windowMonths: months,
+      since,
+      until,
+    }
+  }
+
+  type CompareRegion = 'left' | 'right' | 'overlap'
+
+  interface ApplyCompareParams {
+    leftId: string
+    rightId: string
+    leftTile: ParsedTile
+    rightTile: ParsedTile
+    leftLabel?: string | null
+    rightLabel?: string | null
+    focusLabel?: string
+    highlight?: CompareRegion
+    selectedRegion?: CompareRegion | null
+    autoFocus?: boolean
+  }
+
+  const applyCompareTiles = (params: ApplyCompareParams) => {
+    const {
+      leftId,
+      rightId,
+      leftTile,
+      rightTile,
+      leftLabel,
+      rightLabel,
+      focusLabel,
+      highlight,
+      selectedRegion,
+      autoFocus = true,
+    } = params
+
+    lastCompareIdsRef.current = { a: leftId, b: rightId }
+    const compareTile = buildCompareTile(leftTile as any, rightTile as any, highlight ? { highlight } : undefined)
+
+    const labels = Array.isArray((compareTile as any).labels) ? (compareTile as any).labels as string[] : []
+    setLabels(labels)
+    setMetaNodes([])
+    // For compare, skip external avatar fallbacks to avoid rate limits
+    try { setAvatars(new Array(compareTile.count).fill('')) } catch { setAvatars([]) }
+
+    const groups = (compareTile as any).compareIndexGroups as
+      | { left?: number[]; right?: number[]; overlap?: number[] }
+      | undefined
+    if (groups) {
+      setCompareGroups(groups)
+      if (selectedRegion && (groups as any)[selectedRegion]) {
+        setSidebarIndices((groups as any)[selectedRegion] || null)
+      } else {
+        setSidebarIndices(null)
+      }
+    } else {
+      setCompareGroups(null)
+      setSidebarIndices(null)
+    }
+
+    const focusLeft = leftLabel || leftId
+    const focusRight = rightLabel || rightId
+    if (focusLabel) setFocus(focusLabel)
+    else setFocus(`${focusLeft} + ${focusRight}`)
+
+    setSelectedRegion(selectedRegion ?? null)
+    latestTileRef.current = compareTile as ParsedTile
+    sceneRef.current?.setForeground(compareTile as any)
+    if (autoFocus) {
+      try { (sceneRef.current as any)?.focusIndex?.(0, { animate: true, ms: 480, zoom: 1.9 }) } catch {}
+    }
+    return compareTile as ParsedTile
+  }
+
+  const executeCompareCommand = async (params: {
+    left: string
+    right: string
+    leftTile?: ParsedTile
+    rightTile?: ParsedTile
+    leftLabel?: string | null
+    rightLabel?: string | null
+    focusLabel?: string
+    highlight?: CompareRegion
+    selectedRegion?: CompareRegion | null
+    autoFocus?: boolean
+  }) => {
+    const rid = ++runIdRef.current
+    const leftId = await ensureEntityId(params.left)
+    const rightId = await ensureEntityId(params.right)
+    if (leftId === rightId) throw new Error('Please choose two different entities to compare.')
+    const leftTile = params.leftTile ?? (await loadTileSmart(leftId)).tile
+    const rightTile = params.rightTile ?? (await loadTileSmart(rightId)).tile
+    setErr(null)
+    if (rid !== runIdRef.current) return { leftId, rightId }
+    applyCompareTiles({
+      leftId,
+      rightId,
+      leftTile: leftTile as ParsedTile,
+      rightTile: rightTile as ParsedTile,
+      leftLabel: params.leftLabel ?? null,
+      rightLabel: params.rightLabel ?? null,
+      focusLabel: params.focusLabel,
+      highlight: params.highlight,
+      selectedRegion: params.selectedRegion ?? null,
+      autoFocus: params.autoFocus,
+    })
+    return { leftId, rightId }
+  }
+
+  interface MigrationRow {
+    from_id: string
+    to_id: string
+    movers: number
+    from_name?: string
+    to_name?: string
+    avg_days?: number
+  }
+
+  const buildMigrationTile = (
+    leftId: string,
+    rightId: string,
+    rows: MigrationRow[],
+    opts?: { leftName?: string; rightName?: string }
+  ): ParsedTile & { labels?: string[]; meta?: { nodes: Array<Record<string, unknown>> } } => {
+    const flowCount = rows.length
+    const anchorCount = 2
+    const count = anchorCount + flowCount
+    const nodes = new Float32Array(count * 2)
+    const size = new Float32Array(count)
+    const alpha = new Float32Array(count)
+    const group = new Uint16Array(count)
+
+    const anchors: Array<{ id: string; name: string; x: number; y: number; group: number }> = [
+      { id: leftId, name: opts?.leftName || leftId, x: -480, y: 0, group: 0 },
+      { id: rightId, name: opts?.rightName || rightId, x: 480, y: 0, group: 2 },
+    ]
+
+    anchors.forEach((anchor, idx) => {
+      nodes[idx * 2] = anchor.x
+      nodes[idx * 2 + 1] = anchor.y
+      size[idx] = 18
+      alpha[idx] = 1
+      group[idx] = anchor.group
+    })
+
+    const edgesPerFlow = 2
+    const totalEdges = Math.max(0, flowCount * edgesPerFlow)
+    const edges = new Uint16Array(totalEdges * 2)
+    const edgeWeights = new Float32Array(totalEdges)
+
+    const labels = new Array<string>(count)
+    labels[0] = `${anchors[0].name} • origin`
+    labels[1] = `${anchors[1].name} • destination`
+
+    const metaNodes: Array<Record<string, unknown>> = [
+      { id: leftId, name: anchors[0].name, group: 0 },
+      { id: rightId, name: anchors[1].name, group: 2 },
+    ]
+
+    let edgePtr = 0
+    const verticalSpread = 200
+    rows.forEach((row, idx) => {
+      const nodeIndex = anchorCount + idx
+      const dir = row.from_id === leftId && row.to_id === rightId ? 1 : -1
+      const xOffset = dir > 0 ? 80 : -80
+      const yOffset = (idx - (flowCount - 1) / 2) * verticalSpread
+      nodes[nodeIndex * 2] = xOffset
+      nodes[nodeIndex * 2 + 1] = yOffset
+      const magnitude = Math.max(1, Number(row.movers || 0))
+      size[nodeIndex] = Math.min(26, 8 + Math.sqrt(magnitude))
+      alpha[nodeIndex] = 0.92
+      group[nodeIndex] = 1
+
+      const fromIndex = row.from_id === leftId ? 0 : row.from_id === rightId ? 1 : 0
+      const toIndex = row.to_id === rightId ? 1 : row.to_id === leftId ? 0 : 1
+      edges[edgePtr * 2] = fromIndex
+      edges[edgePtr * 2 + 1] = nodeIndex
+      edgeWeights[edgePtr] = magnitude
+      edgePtr += 1
+      edges[edgePtr * 2] = nodeIndex
+      edges[edgePtr * 2 + 1] = toIndex
+      edgeWeights[edgePtr] = magnitude
+      edgePtr += 1
+
+      const flowLabel = `${row.from_name || row.from_id} → ${row.to_name || row.to_id}`
+      labels[nodeIndex] = `${flowLabel} • ${magnitude.toLocaleString()} movers`
+      metaNodes.push({
+        id: `${row.from_id}-${row.to_id}`,
+        from_id: row.from_id,
+        to_id: row.to_id,
+        movers: magnitude,
+        avg_days: row.avg_days,
+        name: flowLabel,
+        group: 1,
+      })
+    })
+
+    const tile: ParsedTile & { labels?: string[]; meta?: { nodes: Array<Record<string, unknown>> } } = {
+      count,
+      nodes,
+      size,
+      alpha,
+      group,
+      edges,
+      edgeWeights,
+    } as any
+    tile.labels = labels
+    tile.meta = { nodes: metaNodes }
+    ;(tile as any).focusWorld = { x: 0, y: 0 }
+    return tile
+  }
+
+  const executeMigrationCommand = async (params: {
+    left: string
+    right: string
+    limit?: number
+    windowMonths?: number
+    since?: string
+    until?: string
+    rows?: MigrationRow[]
+    focusLabel?: string
+  }) => {
+    const rid = ++runIdRef.current
+    const leftId = await ensureCompanyId(params.left)
+    const rightId = await ensureCompanyId(params.right)
+    if (leftId === rightId) throw new Error('Please choose two different companies to analyze migration.')
+    const rows = params.rows ?? (await fetchMigrationPairs(leftId, rightId, {
+      limit: params.limit,
+      windowMonths: params.windowMonths,
+      since: params.since,
+      until: params.until,
+    }))
+    if (!rows.length) {
+      throw new Error('No migration flows found for that pair.')
+    }
+    const leftName = rows.find((row) => row.from_id === leftId)?.from_name
+      || rows.find((row) => row.to_id === leftId)?.to_name
+    const rightName = rows.find((row) => row.from_id === rightId)?.from_name
+      || rows.find((row) => row.to_id === rightId)?.to_name
+    const tile = buildMigrationTile(leftId, rightId, rows, { leftName, rightName })
+    setErr(null)
+    setLabels(tile.labels || [])
+    setMetaNodes(tile.meta?.nodes as any)
+    try {
+      const ids = ((tile as any).meta?.nodes || []).map((n:any)=> String(n?.id ?? n?.person_id ?? ''))
+      let chMap = new Map<string,string>()
+      try {
+        if (ids.length) {
+          console.log('AvatarMap(flows) request ids sample:', ids.slice(0,10))
+          chMap = await fetchAvatarMap(ids)
+          try { console.log('AvatarMap(flows): ids', ids.length, 'mapped', chMap.size, 'sample', Array.from(chMap.entries()).slice(0,4)) } catch {}
+        }
+      } catch (e) { console.warn('AvatarMap(flows) failed', e) }
+      const av = new Array(tile.count).fill('').map((_, i) => {
+        const node:any = (tile as any).meta?.nodes?.[i] || {}
+        const exp = (node?.avatar_url || node?.avatarUrl) as string | undefined
+        if (exp) return exp
+        const idStr = String(node?.id || '')
+        const fromCH = (idStr && chMap.has(idStr)) ? chMap.get(idStr)! : ''
+        if (fromCH) return fromCH
+        return ''
+      })
+      setAvatars(av)
+      try {
+        if ((tile as any)?.meta?.nodes) {
+          (tile as any).meta.mode = 'flows'
+          ;(tile as any).meta.nodes.forEach((n:any, idx:number)=>{ const u = av[idx]; if (u) n.avatar_url = u })
+          latestTileRef.current = tile as any
+        }
+      } catch {}
+    } catch { setAvatars([]) }
+    setCompareGroups(null)
+    setSidebarIndices(null)
+    setSelectedRegion(null)
+    const focusText = params.focusLabel || `Migration: ${(leftName || leftId)} ↦ ${(rightName || rightId)}`
+    setFocus(focusText)
+    latestTileRef.current = tile as ParsedTile
+    if (rid === runIdRef.current) sceneRef.current?.setForeground(tile as any)
+    try { (sceneRef.current as any)?.focusIndex?.(0, { animate: true, ms: 520, zoom: 1.6 }) } catch {}
+    return { leftId, rightId, rows, tile }
+  }
+
+  const handleBridgeFromEvaluation = async (evaluation: EvaluationResult | null): Promise<{ leftId: string; rightId: string } | null> => {
+    if (!evaluation) return null
+    const viewModel = evaluation.viewModel as any
+    if (!viewModel || viewModel.view !== 'graph' || !Array.isArray(viewModel.bridges)) return null
+
+    const context = getBridgeContextFromExpression(evaluation.expression)
+    let leftInput = context.left
+    let rightInput = context.right
+
+    const rawMeta = Array.isArray(viewModel?.raw?.meta?.nodes) ? viewModel.raw.meta.nodes : []
+    if (!leftInput && typeof rawMeta?.[0]?.id === 'string') leftInput = String(rawMeta[0].id)
+    if (!rightInput && typeof rawMeta?.[1]?.id === 'string') rightInput = String(rawMeta[1].id)
+
+    if (!leftInput || !rightInput) return null
+
+    try {
+      const result = await executeBridgeCommand({
+        left: leftInput,
+        right: rightInput,
+        limit: context.limit,
+        focusLabel: viewModel?.left && viewModel?.right ? `Bridges: ${viewModel.left} ↔ ${viewModel.right}` : undefined,
+      })
+      return { leftId: result.leftId, rightId: result.rightId }
+    } catch (error: any) {
+      setErr(error?.message || 'bridges failed')
+    }
+    return null
+  }
+
+  const handleCompareFromEvaluation = async (evaluation: EvaluationResult | null): Promise<{ leftId: string; rightId: string } | null> => {
+    if (!evaluation) return null
+    const viewModel = evaluation.viewModel as any
+    const tiles = viewModel?.tiles
+    if (!viewModel || viewModel.view !== 'list' || !tiles || !tiles.left || !tiles.right) return null
+
+    const context = getCompareContextFromExpression(evaluation.expression)
+    const leftInput = context.left
+    const rightInput = context.right
+    if (!leftInput || !rightInput) return null
+
+    try {
+      const result = await executeCompareCommand({
+        left: leftInput,
+        right: rightInput,
+        leftTile: tiles.left as ParsedTile,
+        rightTile: tiles.right as ParsedTile,
+        leftLabel: viewModel.left ?? null,
+        rightLabel: viewModel.right ?? null,
+        focusLabel: viewModel.left && viewModel.right ? `Compare: ${viewModel.left} ↔ ${viewModel.right}` : undefined,
+      })
+      return result
+    } catch (error: any) {
+      setErr(error?.message || 'compare failed')
+      return null
+    }
+  }
+
+  const handleMigrationFromEvaluation = async (evaluation: EvaluationResult | null): Promise<{ leftId: string; rightId: string } | null> => {
+    if (!evaluation) return null
+    const viewModel = evaluation.viewModel as any
+    if (!viewModel || viewModel.view !== 'flows' || !Array.isArray(viewModel.pairs)) return null
+
+    const context = getMigrationContextFromExpression(evaluation.expression)
+    const leftInput = context.left
+    const rightInput = context.right
+    if (!leftInput || !rightInput) return null
+
+    try {
+      const result = await executeMigrationCommand({
+        left: leftInput,
+        right: rightInput,
+        limit: context.limit,
+        windowMonths: context.windowMonths,
+        since: context.since,
+        until: context.until,
+        rows: Array.isArray(viewModel.rows) ? (viewModel.rows as MigrationRow[]) : undefined,
+      })
+      return { leftId: result.leftId, rightId: result.rightId }
+    } catch (error: any) {
+      setErr(error?.message || 'migration failed')
+      return null
+    }
+  }
+
+  async function run(cmd: string, opts?: RunOptions, evaluation?: EvaluationResult | null){
+    const rid = ++runIdRef.current
     const pushHistory = opts?.pushHistory !== false;
     const s = cmd.trim();
     if (!s) return;
@@ -90,89 +813,248 @@ export default function App(){
       try { (sceneRef.current as any)?.focusIndex?.(0, { animate:true, ms:420, zoom: 2.0 }) } catch {}
       return
     }
+    if (evaluation) {
+      const bridgeHandled = await handleBridgeFromEvaluation(evaluation)
+      if (bridgeHandled) {
+        if (pushHistory) {
+          const commandKey = `bridges ${bridgeHandled.leftId} + ${bridgeHandled.rightId}`
+          setHistory((h) => {
+            const nh = [...h.slice(0, cursor + 1), { id: commandKey, move: { x: 0, y: 0 }, turn: 0 }]
+            setCursor(nh.length - 1)
+            return nh
+          })
+        }
+        return
+      }
+      const compareHandled = await handleCompareFromEvaluation(evaluation)
+      if (compareHandled) {
+        if (pushHistory) {
+          const commandKey = `compare ${compareHandled.leftId} + ${compareHandled.rightId}`
+          setHistory((h) => {
+            const nh = [...h.slice(0, cursor + 1), { id: commandKey, move: { x: 0, y: 0 }, turn: 0 }]
+            setCursor(nh.length - 1)
+            return nh
+          })
+        }
+        return
+      }
+      const migrationHandled = await handleMigrationFromEvaluation(evaluation)
+      if (migrationHandled) {
+        if (pushHistory) {
+          const commandKey = `migration ${migrationHandled.leftId} * ${migrationHandled.rightId}`
+          setHistory((h) => {
+            const nh = [...h.slice(0, cursor + 1), { id: commandKey, move: { x: 0, y: 0 }, turn: 0 }]
+            setCursor(nh.length - 1)
+            return nh
+          })
+        }
+        return
+      }
+      const unsupportedOps = new Set<CruxOperatorToken['op']>(['membership', 'center', 'reweight', 'reach', 'similar'])
+      const unsupportedToken = evaluation.expression?.tokens.find(
+        (tok) => tok.type === 'operator' && unsupportedOps.has((tok as CruxOperatorToken).op)
+      ) as CruxOperatorToken | undefined
+      if (unsupportedToken) {
+        const label = unsupportedToken.raw || unsupportedToken.op
+        setErr(`Operator "${label}" is not implemented yet.`)
+        return
+      }
+    }
+    // Algebraic role/icp filters without a leading verb
+    // Examples:
+    //   person:<id> role:"(engineer|software|sre)" [min:<months>] [top:<n>]
+    //   person:<id> -> company:<id> role:"(vp|director|head)" [k:<n>] [min_r_mt:<0-1>]
+    if (/(?:\brole:|\bicp:)/i.test(s)){
+      try {
+        const rest = s.trim()
+        const restNoVerb = rest.replace(/^paths\s*/i, '')
+        const roleMatch = restNoVerb.match(/(?:role|icp):(\"[^\"]+\"|'[^']+'|[^\s]+)/i)
+        const role = roleMatch ? roleMatch[1].replace(/^['"]|['"]$/g,'').trim() : undefined
+        const kMatch = restNoVerb.match(/\bk:(\d+)/i); const k = kMatch ? parseInt(kMatch[1],10) : undefined
+        const minRmtMatch = restNoVerb.match(/\bmin_r_mt:([0-1](?:\.\d+)?|0?\.\d+)/i); const minRMT = minRmtMatch ? Math.max(0, Math.min(1, parseFloat(minRmtMatch[1]))) : undefined
+        const minMatch = restNoVerb.match(/\bmin:(\d+)/i); const minMonths = minMatch ? Math.max(1, parseInt(minMatch[1],10)) : 24
+        const topMatch = restNoVerb.match(/\btop:(\d+)/i); const top = topMatch ? Math.max(1, parseInt(topMatch[1],10)) : 80
+
+        const arrowSplit = restNoVerb.split(/\s*->\s*/)
+        if (arrowSplit.length === 2) {
+          const left = arrowSplit[0].replace(/(?:role|icp):(\"[^\"]+\"|'[^']+'|[^\s]+)/i,'').trim()
+          const right = arrowSplit[1].replace(/\bk:\d+|\bmin_r_mt:[0-9.]+|\s*(?:role|icp):(\"[^\"]+\"|'[^']+'|[^\s]+)/ig,'').trim()
+          await executeIntroPathsCommand({ S: left, company: right, icp: role, k, minRMT })
+          if (pushHistory) { const commandKey = `${left} -> ${right}`; setHistory((h)=>{ const nh=[...h.slice(0,cursor+1), { id: commandKey, move:{x:0,y:0}, turn:0 }]; setCursor(nh.length-1); return nh }) }
+        } else {
+          // Person-anchored network filter: render tile
+          const personId = await ensureEntityId(restNoVerb.replace(/\s*(?:role|icp):(\"[^\"]+\"|'[^']+'|[^\s]+)/i,'').replace(/\bmin:\d+|\btop:\d+/ig,'').trim())
+          const result = await fetchNetworkByFilter({ S: personId, roleRegex: role, minOverlapMonths: minMonths, limitFirst: top, limitSecond: Math.max(top, Math.min(600, top * 3)), minSecondMonths: 24 })
+
+          const n1 = result.first.length
+          const n2 = result.second.length
+          const n = 1 + n1 + n2
+          const nodes = new Float32Array(n * 2)
+          const size = new Float32Array(n)
+          const alpha = new Float32Array(n)
+          const group = new Uint16Array(n)
+          const edgesArr: Array<[number, number]> = []
+          const weights: number[] = []
+          const labelsLocal = new Array<string>(n)
+          const metaLocal: Array<Record<string, unknown>> = new Array(n)
+
+          // Center
+          const pid = personId.replace(/^person:/i,'')
+          let centerName = `person:${pid}`
+          try { const p = await fetchPersonProfile(pid); if (p?.name) centerName = p.name } catch {}
+          nodes[0] = 0; nodes[1] = 0; size[0] = 16; alpha[0] = 1; group[0] = 0
+          labelsLocal[0] = centerName
+          metaLocal[0] = { id: pid, name: centerName, group: 0 }
+
+          // Place first-degree matches in inner ring
+          const R1 = 320
+          const m1 = Math.max(1, n1)
+          for (let i=0;i<n1;i++){
+            const ang = (i / m1) * Math.PI * 2
+            const idx = 1 + i
+            nodes[idx*2] = Math.cos(ang) * R1 + (Math.random()*2-1)*14
+            nodes[idx*2+1] = Math.sin(ang) * R1 + (Math.random()*2-1)*14
+            size[idx] = 10; alpha[idx] = 0.95; group[idx] = 1
+            const row = result.first[i]
+            labelsLocal[idx] = row.name || row.id
+            metaLocal[idx] = { id: row.id, name: row.name || row.id, title: row.title || null, group: 1 }
+            edgesArr.push([0, idx]); weights.push(Math.max(1, Math.round(Number(row.overlap_months || 0))))
+          }
+
+          // Index map for first-degree ids to node index
+          const idxOfFirst = new Map<string, number>()
+          for (let i=0;i<n1;i++){ idxOfFirst.set(String(result.first[i].id), 1 + i) }
+
+          // Place second-degree matches in outer ring; link to their first-degree anchor
+          const start2 = 1 + n1
+          const R2 = 560
+          const m2 = Math.max(1, n2)
+          for (let i=0;i<n2;i++){
+            const ang = (i / m2) * Math.PI * 2 + (Math.random()*0.08-0.04)
+            const idx = start2 + i
+            nodes[idx*2] = Math.cos(ang) * R2 + (Math.random()*2-1)*16
+            nodes[idx*2+1] = Math.sin(ang) * R2 + (Math.random()*2-1)*16
+            size[idx] = 9; alpha[idx] = 0.92; group[idx] = 2
+            const row = result.second[i]
+            labelsLocal[idx] = row.name || row.id
+            metaLocal[idx] = { id: row.id, name: row.name || row.id, title: row.title || null, group: 2 }
+            const fi = idxOfFirst.get(String(row.first_id))
+            if (typeof fi === 'number') { edgesArr.push([fi, idx]); weights.push(Math.max(1, Math.round(Number(row.overlap_months || 0)))) }
+          }
+
+          const edges = new Uint16Array(edgesArr.length * 2)
+          const edgeWeights = new Float32Array(weights.length)
+          for (let i=0;i<edgesArr.length;i++){ edges[i*2]=edgesArr[i][0]; edges[i*2+1]=edgesArr[i][1]; edgeWeights[i]=weights[i] }
+
+          const tile: ParsedTile & { labels?: string[], meta?: { nodes: Array<Record<string, unknown>> } } = {
+            count: n,
+            nodes, size, alpha, group, edges, edgeWeights,
+          } as any
+          ;(tile as any).labels = labelsLocal
+          ;(tile as any).meta = { nodes: metaLocal }
+          ;(tile as any).focusWorld = { x: 0, y: 0 }
+
+          // Avatars
+          const idsForLookup = metaLocal.map((m:any)=> String(m?.id || '')).filter(Boolean)
+          let chMap = new Map<string,string>()
+          try { if (idsForLookup.length) chMap = await fetchAvatarMap(idsForLookup) } catch {}
+          const av = new Array(n).fill('').map((_, i)=>{ const idStr = String((metaLocal[i] as any)?.id || ''); return (idStr && chMap.has(idStr)) ? chMap.get(idStr)! : '' })
+          setAvatars(av)
+          try { (tile as any)?.meta?.nodes?.forEach((m:any, idx:number)=>{ const u = av[idx]; if (u) m.avatar_url = u }) } catch {}
+
+          latestTileRef.current = tile as ParsedTile
+          setErr(null)
+          setLabels(labelsLocal)
+          setMetaNodes(metaLocal as any)
+          setSidebarOpen(true)
+          sceneRef.current?.setForeground(tile as any)
+
+          const summary = `${result.matched}/${result.total} matched (${(result.share * 100).toFixed(1)}%) | 1°:${n1} 2°:${n2}`
+          setFocus(`person:${pid} • ${summary}`)
+          try { (sceneRef.current as any)?.focusIndex?.(0, { animate: true, ms: 460, zoom: 1.6 }) } catch {}
+        }
+      } catch (e:any) {
+        setErr(e?.message || 'role/icp query failed')
+      }
+      return
+    }
+
+    // Intro Paths: "paths <personId> -> <companyId> [icp:<regex>] [k:<n>]"
+    if (/^paths\b/i.test(s)){
+      try {
+        const rest = s.replace(/^paths\s*/i, '')
+        // Extract icp and k filters
+        const icpMatch = rest.match(/icp:([^\s]+(?:\s[^k]+)?)$/i)
+        const kMatch = rest.match(/\bk:(\d+)/i)
+        const icp = icpMatch ? icpMatch[1].trim() : undefined
+        const cleaned = rest.replace(/icp:[^\n]+/i,'').trim()
+        const arrowSplit = cleaned.split(/\s*->\s*/)
+        if (arrowSplit.length !== 2) { setErr('paths syntax: paths person:<id> -> company:<id> icp:<regex> k:<n>'); return }
+        const left = arrowSplit[0].trim()
+        const right = arrowSplit[1].replace(/\bk:\d+/i,'').trim()
+        await executeIntroPathsCommand({ S: left, company: right, icp, k: kMatch ? parseInt(kMatch[1], 10) : undefined })
+        if (pushHistory) {
+          const commandKey = `paths ${left} -> ${right}`
+          setHistory((h)=>{ const nh=[...h.slice(0,cursor+1), { id: commandKey, move: { x:0, y:0 }, turn: 0 }]; setCursor(nh.length-1); return nh })
+        }
+      } catch (e:any) {
+        const step = (e && e.step) || 'unknown'
+        const code = (e && e.code) || 'ERR'
+        setErr(`Failed at ${step}: ${code} — ${e?.message || 'paths failed'}`)
+      }
+      return
+    }
+
     // Bridges mode: "bridges <companyA> + <companyB>"
     if (/^bridges\b/i.test(s)) {
       const raw = s.replace(/^bridges\s*/i, '')
       const parts = raw.split('+').map(t => t.trim()).filter(Boolean)
       if (parts.length !== 2) { setErr('Bridges expects two companies, e.g. "bridges Acme + Globex"'); return }
-      const [aIn, bIn] = parts
-      const [aId, bId] = await Promise.all([resolveSmart(aIn), resolveSmart(bIn)])
-      if (!aId || !bId || !aId.startsWith('company:') || !bId.startsWith('company:')) { setErr('Both sides must resolve to company:<id>. Try exact names or a domain.'); return }
       try {
-        setErr(null)
-        setFocus(`${aId} bridges ${bId}`)
-        const j = await fetchBridgesTileJSON(aId, bId, 180)
-        // Decorate labels for bridges: append score/degree if provided
-        const decorateLabels = (labelsIn: string[], payload: any): string[] => {
-          try {
-            const meta = Array.isArray(payload?.meta?.nodes) ? payload.meta.nodes : []
-            const groups = Array.isArray(payload?.coords?.groups) ? payload.coords.groups : []
-            if (!Array.isArray(labelsIn)) return []
-            return labelsIn.map((lab, i) => {
-              const g = typeof groups[i] === 'number' ? groups[i] : (typeof meta?.[i]?.group === 'number' ? meta[i].group : undefined)
-              if (g === 1) {
-                const sc = meta?.[i]?.score
-                const deg = meta?.[i]?.degree
-                const scorePart = (typeof sc === 'number') ? ` • score ${Number(sc).toFixed(2)}` : ''
-                const degPart = (typeof deg === 'number') ? ` • deg ${deg}` : ''
-                return `${lab || ''}${scorePart}${degPart}`.trim()
-              }
-              return lab
-            })
-          } catch { return labelsIn }
+        const result = await executeBridgeCommand({ left: parts[0], right: parts[1], limit: 180 })
+        if (pushHistory) {
+          const commandKey = `bridges ${result.leftId} + ${result.rightId}`
+          setHistory((h)=>{ const nh=[...h.slice(0,cursor+1), { id: commandKey, move: { x:0, y:0 }, turn: 0 }]; setCursor(nh.length-1); return nh })
         }
-        const tile = parseJsonTile(j as any)
-        try {
-          const labelsIn = (j as any).labels as string[] | undefined
-          if (labelsIn) setLabels(decorateLabels(labelsIn, j))
-        } catch {}
-        try {
-          const meta = (j as any)?.meta?.nodes as any[] | undefined
-          const labelsLocal = (j as any).labels as string[] | undefined
-          const av = new Array(tile.count).fill('').map((_, i)=>{
-            const m = meta?.[i]
-            const li = (m && typeof m.linkedin === 'string') ? m.linkedin as string : undefined
-            if (li) {
-              const url = /^https?:\/\//i.test(li) ? li : `https://www.linkedin.com/in/${String(li).replace(/^\/*in\//,'')}`
-              return `https://unavatar.io/${encodeURIComponent(url)}?fallback=false`
-            }
-            const lab = labelsLocal?.[i] || `#${i}`
-            const seed = encodeURIComponent(lab)
-            return `https://api.dicebear.com/7.x/thumbs/svg?seed=${seed}`
-          })
-          setAvatars(av)
-        } catch {}
-        latestTileRef.current = tile as ParsedTile
-        sceneRef.current?.setForeground(tile as any)
-        return
       } catch (e:any) {
-        setErr(e?.message || 'bridges failed')
+        const step = (e && e.step) || 'unknown'
+        const code = (e && e.code) || 'ERR'
+        setErr(`Failed at ${step}: ${code} — ${e?.message || 'bridges failed'}`)
         return
       }
-    }
-    // Compare mode: "<a> + <b>" or "compare <a> + <b>"
-    if (/\+/.test(s)) {
-      await runCompare(s);
-      return;
-    }
-    if (/^suggest\s+best\s+compare$/i.test(s)){
-      try {
-        const best = await suggestBestPair()
-        if (best) { await run(`compare ${best.a} + ${best.b}`); return }
-        setErr('No suitable pair found in a quick scan.')
-      } catch (e:any) { setErr(e?.message || 'suggest failed') }
       return
     }
+    if (/\*/.test(s) || /^migration\b/i.test(s)) {
+      const cleaned = s.replace(/^migration\s*/i, '')
+      const parts = cleaned.split(/\s*\*\s*/).filter(Boolean)
+      if (parts.length !== 2) { setErr('Migration expects two companies, e.g. "Acme * Globex"'); return }
+      try {
+        const result = await executeMigrationCommand({ left: parts[0], right: parts[1] })
+        if (pushHistory) {
+          const commandKey = `migration ${result.leftId} * ${result.rightId}`
+          setHistory((h)=>{ const nh=[...h.slice(0,cursor+1), { id: commandKey, move: { x:0, y:0 }, turn: 0 }]; setCursor(nh.length-1); return nh })
+        }
+      } catch (e:any) {
+        const step = (e && e.step) || 'unknown'
+        const code = (e && e.code) || 'ERR'
+        setErr(`Failed at ${step}: ${code} — ${e?.message || 'migration failed'}`)
+      }
+      return
+    }
+    // Compare mode: "<a> + <b>" or "compare <a> + <b>"
+    if (/>\s*<|\+/.test(s)) {
+      await runCompare(s, { pushHistory });
+      return;
+    }
+    // disable heuristic compare suggestions in strict mode
     const m = /^show\s+(.+)$/.exec(s);
     let id = (m ? m[1] : s).trim();
-    // resolve via cache-first or backend fallback
-    const r = await resolveSmart(id)
-    if (!r) { setErr('Could not resolve that person/company. Try a LinkedIn URL or exact name.'); return }
-    id = r
+    // Strict: only canonical ids allowed
+    if (!/^(company|person):\d+$/i.test(id)) { setErr('Provide canonical company:<id> or person:<id>'); return }
     setFocus(id);
     // We will push history after we know the move vector actually used
     setErr(null);
-    try {
+      try {
       const { tile } = await loadTileSmart(id)
       // Capture labels for sidebar (if provided by JSON path)
       try { if ((tile as any).labels && Array.isArray((tile as any).labels)) setLabels((tile as any).labels as string[]) } catch {}
@@ -180,88 +1062,66 @@ export default function App(){
       try {
         const metaNodes: Array<{ avatar_url?: string, avatarUrl?: string, name?: string, full_name?: string, id?: string|number, linkedin?: string }> | undefined = (tile as any).meta?.nodes
         if (Array.isArray(metaNodes)) setMetaNodes(metaNodes as any)
-        const av = new Array(tile.count).fill('').map((_, i)=>{
-          const m = metaNodes?.[i]
-          const url = (m?.avatar_url || m?.avatarUrl) as string | undefined
-          if (url && typeof url === 'string') return url
-          const li = (m?.linkedin && typeof m.linkedin === 'string') ? m.linkedin : undefined
-          if (li) {
-            const full = /^https?:\/\//i.test(li) ? li : `https://www.linkedin.com/in/${String(li).replace(/^\/*in\//,'')}`
-            return `https://unavatar.io/${encodeURIComponent(full)}?fallback=false`
+        const ids = (metaNodes || []).map((n:any)=> String(n?.id ?? n?.person_id ?? ''))
+        let chMap = new Map<string,string>()
+        try {
+          if (ids.length) {
+            console.log('AvatarMap(person) request ids sample:', ids.slice(0,10))
+            chMap = await fetchAvatarMap(ids)
+            try { console.log('AvatarMap(person): ids', ids.length, 'mapped', chMap.size, 'sample', Array.from(chMap.entries()).slice(0,4)) } catch {}
           }
-          const label = (m?.full_name || m?.name || (tile as any).labels?.[i]) as string | undefined
-          const seed = encodeURIComponent(label || String(m?.id || i))
-          return `https://api.dicebear.com/7.x/thumbs/svg?seed=${seed}`
+        } catch (e) { console.warn('AvatarMap(person) failed', e) }
+        const av = new Array(tile.count).fill('').map((_, i)=>{
+          const m:any = metaNodes?.[i] || {}
+          const exp = (m?.avatar_url || m?.avatarUrl) as string | undefined
+          if (exp) return exp
+          const idStr = String(m?.id || '')
+          const fromCH = (idStr && chMap.has(idStr)) ? chMap.get(idStr)! : ''
+          if (fromCH) return fromCH
+          return ''
         })
         setAvatars(av)
+        try {
+          if ((tile as any)?.meta?.nodes) {
+            (tile as any).meta.mode = 'person'
+            ;(tile as any).meta.nodes.forEach((n:any, idx:number)=>{ const u = av[idx]; if (u) n.avatar_url = u })
+            latestTileRef.current = tile as any
+          }
+        } catch {}
       } catch {}
 
-      // Offset to one of four cardinal directions and mark spawn
+      // Centralize spawn in CanvasScene: no App-level offset. Mark spawn as zero and record zero move in history.
       try {
-        const DIST = 900
-        const dirs = [ {x:0, y:-DIST}, {x:DIST, y:0}, {x:0, y:DIST}, {x:-DIST, y:0} ]
-        const usedMove = opts?.overrideMove || dirs[spawnDir % 4]
         if (tile?.nodes && typeof tile.nodes.length === 'number'){
-          for (let i=0;i<tile.count;i++){
-            tile.nodes[i*2] += usedMove.x
-            tile.nodes[i*2+1] += usedMove.y
-          }
-          ;(tile as any).spawn = { x: usedMove.x, y: usedMove.y }
-          // Set desired focus target as the center node
+          ;(tile as any).spawn = { x: 0, y: 0 }
           try { (tile as any).focusWorld = { x: tile.nodes[0], y: tile.nodes[1] } } catch {}
-          if (!opts?.overrideMove) setSpawnDir((spawnDir+1)%4)
           if (pushHistory) {
+            const usedMove = { x: 0, y: 0 }
             setHistory(h=>{ const nh=[...h.slice(0,cursor+1), { id, move: usedMove, turn: opts?.turnRadians || 0 }]; setCursor(nh.length-1); return nh })
           }
         }
-      } catch (e) { console.warn('spawn offset failed', e) }
+      } catch {}
 
       try {
         latestTileRef.current = tile as ParsedTile
-        sceneRef.current?.setForeground(tile as any);
-      } catch (e) {
-        console.error('App: setForeground failed:', e)
-      }
-      console.log('App: Received tile:', {
-        count: tile.count,
-        nodesLength: tile.nodes?.length,
-        edgesLength: tile.edges?.length,
-        labelsLength: tile.labels?.length
-      })
-    } catch (e: any) {
-      setErr(e?.message || "fetch failed");
+        if (rid === runIdRef.current) sceneRef.current?.setForeground(tile as any);
+      } catch {}
+      // If person: preload profile and open profile panel
+      try {
+        if (/^person:\d+$/i.test(id)) {
+          const pid = id.replace(/^person:/i, '')
+          const p = await fetchPersonProfile(pid)
+          if (p) { setProfile(p); setProfileOpen(true) }
+        } else { setProfile(null); setProfileOpen(false) }
+      } catch {}
+      } catch (e: any) {
+      const step = (e && e.step) || 'unknown'
+      const code = (e && e.code) || 'ERR'
+      setErr(`Failed at ${step}: ${code} — ${e?.message || "fetch failed"}`);
     }
   }
 
-  async function suggestBestPair(): Promise<{ a:string, b:string } | null> {
-    // Quick heuristic: try last few history items and a few hard-coded seeds
-    const seeds = new Set<string>()
-    for (let i=Math.max(0, history.length-6); i<history.length; i++) seeds.add(history[i].id)
-    // If nothing in history, try some labels from current sidebar
-    for (let i=0;i<Math.min(labels.length, 20);i++){ const name = labels[i]; if (name) seeds.add(`person:${name}`) }
-    const arr = Array.from(seeds).slice(0, 6)
-    if (arr.length < 2) return null
-    let best: any = null
-    for (let i=0;i<arr.length;i++) for (let j=i+1;j<arr.length;j++){
-      try {
-        const [A, B] = await Promise.all([resolveSmart(arr[i]), resolveSmart(arr[j])])
-        if (!A || !B) continue
-        if (A === B) continue
-        const [{ tile: aTile }, { tile: bTile }] = await Promise.all([loadTileSmart(A), loadTileSmart(B)])
-        const da = degreesFor(aTile as any, { workOnly:true, minYears:24 })
-        const db = degreesFor(bTile as any, { workOnly:true, minYears:24 })
-        const m1 = intersectCount(da.firstIds, db.firstIds)
-        const m2 = intersectCount(da.secondIds, db.secondIds)
-        const cAB = intersectCount(da.firstIds, db.secondIds)
-        const cBA = intersectCount(db.firstIds, da.secondIds)
-        const aOnly = diffCount(new Set([...da.firstIds, ...da.secondIds]), new Set([...db.firstIds, ...db.secondIds]))
-        const bOnly = diffCount(new Set([...db.firstIds, ...db.secondIds]), new Set([...da.firstIds, ...da.secondIds]))
-        const score = m1*3 + m2*2 + Math.min(cAB, cBA) - Math.abs(aOnly - bOnly)*0.5
-        if (!best || score > best.score) best = { a:A, b:B, score }
-      } catch {}
-    }
-    return best ? { a: best.a, b: best.b } : null
-  }
+  // Strict mode: suggestion heuristic removed
 
   function intersectCount(a:Set<string>, b:Set<string>){ let k=0; for (const x of a) if (b.has(x)) k++; return k }
   function diffCount(a:Set<string>, b:Set<string>){ let k=0; for (const x of a) if (!b.has(x)) k++; return k }
@@ -307,7 +1167,7 @@ export default function App(){
         keep = false
         if (weights && (weights as any).length === mAll){
           const w = Number((weights as any)[i])
-          if (Number.isFinite(w) && w >= minYears) keep = true
+          if (Number.isFinite(w) && w >= (opts?.minYears ?? 24)) keep = true
         }
       }
       if (keep){ neighbors[a].push(b); neighbors[b].push(a) }
@@ -337,8 +1197,8 @@ export default function App(){
       if (weights && (weights as any).length === mAll){
         w = Number((weights as any)[i])
       }
-      if (w >= minFirstMonths){ neighbors24[a].push(b); neighbors24[b].push(a) }
-      if (w >= minSecondMonths){ neighbors36[a].push(b); neighbors36[b].push(a) }
+      if (w >= Math.max(24, minFirstMonths)){ neighbors24[a].push(b); neighbors24[b].push(a) }
+      if (w >= Math.max(24, minSecondMonths)){ neighbors36[a].push(b); neighbors36[b].push(a) }
     }
     const first = Array.from(new Set(neighbors24[0]||[])).filter(i=>i>0)
     const firstIds = new Set<string>(first.map(i=>nodeIdFor(tile as any, i)))
@@ -388,9 +1248,9 @@ export default function App(){
   }
 
   function buildCompareTile(a: ParsedTile, b: ParsedTile, opts?: { highlight?: 'left'|'right'|'overlap' }){
-    // Compute degrees with dual thresholds: 24m for first-degree, 36m for second-degree hops
-    const degA = degreesForDual(a, 24, 36)
-    const degB = degreesForDual(b, 24, 36)
+    // Compute degrees with dual thresholds: 24m for both first and second-degree hops
+    const degA = degreesForDual(a, MIN_OVERLAP_MONTHS, MIN_OVERLAP_MONTHS)
+    const degB = degreesForDual(b, MIN_OVERLAP_MONTHS, MIN_OVERLAP_MONTHS)
     const mapA = buildIdLabelMap(a as any)
     const mapB = buildIdLabelMap(b as any)
     // Overlap categories
@@ -405,15 +1265,6 @@ export default function App(){
     const totalCats = degA.first.length + degA.second.length + degB.first.length + degB.second.length
     if (totalCats === 0) {
       try { setErr('No work-overlap edges (>=24 months) found for either ego. Please choose another pair or relax the threshold.'); } catch {}
-    } else {
-      try {
-        console.log('Compare(work-only):', {
-          A: { first: degA.first.length, second: degA.second.length },
-          B: { first: degB.first.length, second: degB.second.length },
-          mutual: { first: mutualF1.length, second: mutualF2.length },
-          cross: { A1_B2: aF1_bF2.length, B1_A2: bF1_aF2.length }
-        })
-      } catch {}
     }
 
     // Map id -> source tile and original index to get labels
@@ -638,35 +1489,18 @@ export default function App(){
     return out
   }
 
-  async function runCompare(raw: string){
+  async function runCompare(raw: string, opts?: { pushHistory?: boolean }){
+    const pushHistory = opts?.pushHistory !== false
     try {
-      const s = raw.replace(/^compare\s*/i,'')
-      const parts = s.split('+').map(t=>t.trim()).filter(Boolean)
+      const cleaned = raw.replace(/^compare\s*/i, '').trim()
+      const parts = cleaned.split(/\s*(?:\+|><)\s*/).filter(Boolean)
       if (parts.length !== 2) { setErr('Compare expects exactly two ids, e.g. "Alice + Bob"'); return }
-      const [aIn, bIn] = parts
-      const [aId, bId] = await Promise.all([resolveSmart(aIn), resolveSmart(bIn)])
-      if (!aId || !bId) { setErr('Could not resolve one or both ids for compare.'); return }
-      if (aId === bId) { setErr('Please choose two different people to compare.'); return }
-      setErr(null)
-      setFocus(`${aId} + ${bId}`)
-      const [{ tile: aTile }, { tile: bTile }] = await Promise.all([loadTileSmart(aId), loadTileSmart(bId)])
-      lastCompareIdsRef.current = { a:aId, b:bId }
-      const compareTile = buildCompareTile(aTile as any, bTile as any)
-      // Update labels/avatars for sidebar
-      try { if ((compareTile as any).labels) setLabels((compareTile as any).labels as string[]) } catch {}
-      try {
-        const av = new Array(compareTile.count).fill('').map((_, i)=>{
-          const label = (compareTile as any).labels?.[i]
-          const seed = encodeURIComponent(label || String(i))
-          return `https://api.dicebear.com/7.x/thumbs/svg?seed=${seed}`
-        })
-        setAvatars(av)
-      } catch {}
-      try { const g = (compareTile as any).compareIndexGroups; if (g) { setCompareGroups(g); setSidebarIndices(null) } } catch {}
-      setSelectedRegion(null)
-      sceneRef.current?.setForeground(compareTile as any)
-      // Zoom in more on load for compare to reduce perceived noise
-      try { (sceneRef.current as any)?.focusIndex?.(0, { animate:true, ms:480, zoom: 1.9 }) } catch {}
+      const [leftRaw, rightRaw] = parts
+      const result = await executeCompareCommand({ left: leftRaw, right: rightRaw })
+      if (pushHistory) {
+        const commandKey = `compare ${result.leftId} + ${result.rightId}`
+        setHistory((h)=>{ const nh=[...h.slice(0,cursor+1), { id: commandKey, move: { x:0, y:0 }, turn: 0 }]; setCursor(nh.length-1); return nh })
+      }
     } catch (e:any) {
       setErr(e?.message || 'compare failed')
     }
@@ -675,18 +1509,19 @@ export default function App(){
   // Region click handling in compare mode
   async function onRegionClick(region: 'left'|'right'|'overlap'){
     try {
-      setSelectedRegion(region)
       const ids = lastCompareIdsRef.current
       if (!ids) return
       const [{ tile: aTile }, { tile: bTile }] = await Promise.all([loadTileSmart(ids.a), loadTileSmart(ids.b)])
-      const compareTile = buildCompareTile(aTile as any, bTile as any, { highlight: region })
-      try { const g = (compareTile as any).compareIndexGroups; if (g) setCompareGroups(g) } catch {}
-      // Sidebar filter by region
-      try {
-        const g = (compareTile as any).compareIndexGroups
-        if (g && g[region]) setSidebarIndices(g[region])
-      } catch {}
-      sceneRef.current?.setForeground(compareTile as any)
+      applyCompareTiles({
+        leftId: ids.a,
+        rightId: ids.b,
+        leftTile: aTile as ParsedTile,
+        rightTile: bTile as ParsedTile,
+        highlight: region,
+        selectedRegion: region,
+        autoFocus: false,
+        focusLabel: focus || undefined,
+      })
     } catch {}
   }
 
@@ -695,6 +1530,7 @@ export default function App(){
     const onKey = (e: KeyboardEvent)=>{
       const active = document.activeElement as HTMLElement | null
       const isTyping = !!(active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || (active as any)?.isContentEditable))
+      if (e.key === '1') { setProfileOpen(v=>!v); return }
       if (e.key === 'ArrowDown' && typeof selectedIndex === 'number') setSelectedIndex((prev)=>{
         const cur = (typeof prev === 'number' ? prev : 0)
         return (cur + 1) % metaNodes.length
@@ -703,14 +1539,16 @@ export default function App(){
         const cur = (typeof prev === 'number' ? prev : 0)
         return (cur - 1 + metaNodes.length) % metaNodes.length
       })
-      if (e.key === 'ArrowRight' && typeof selectedIndex === 'number') {
+      // Move focus to next node with Left Arrow (was Right Arrow)
+      if (e.key === 'ArrowLeft' && typeof selectedIndex === 'number') {
         setSelectedIndex((prev)=>{
           const next = ((typeof prev === 'number' ? prev : 0) + 1) % metaNodes.length
           ;(sceneRef.current as any)?.focusIndex?.(next, { zoom: 0.9 })
           return next
         })
       }
-      if (e.key === 'ArrowLeft') {
+      // Spawn selected person's graph with Right Arrow (was Left Arrow)
+      if (e.key === 'ArrowRight') {
         if (isTyping) return
         if (typeof selectedIndex !== 'number' || selectedIndex < 0) return
         const sel = metaNodes?.[selectedIndex]
@@ -759,7 +1597,7 @@ export default function App(){
   }, [selectedIndex, metaNodes, history, cursor])
 
   return (
-    <div className="w-full h-full" style={{ background: "transparent", color: "white", position:'fixed', inset:0, overflow:'hidden' }}>
+    <div className="w-full h-full" style={{ background: "var(--dt-bg)", color: "var(--dt-text)", position:'fixed', inset:0, overflow:'hidden' }}>
       {rendererMode === 'canvas' ? (
         <CanvasScene
           ref={handleSceneRef}
@@ -768,7 +1606,7 @@ export default function App(){
           visibleMask={visibleMask}
           onPick={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate:true, ms:520, zoomMultiplier: 6 }); }}
           onClear={()=>{ sceneRef.current?.clear(); setFocus(null); }}
-          onStats={(fps,count)=>{ setFps(fps); setNodeCount(count) }}
+          onStats={(_,count)=>{ setNodeCount(count) }}
           onRegionClick={onRegionClick}
         />
       ) : (
@@ -779,14 +1617,14 @@ export default function App(){
           visibleMask={visibleMask}
           onPick={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate:true, ms:520, zoomMultiplier: 6 }); }}
           onClear={()=>{ sceneRef.current?.clear(); setFocus(null); }}
-          onStats={(fps,count)=>{ setFps(fps); setNodeCount(count) }}
+          onStats={(_,count)=>{ setNodeCount(count) }}
           onRegionClick={onRegionClick}
         />
       )}
       <div style={{ position:'absolute', top:16, right:24, zIndex:30, display:'flex', gap:8 }}>
         <button
           onClick={()=> setRendererMode(mode => mode === 'canvas' ? 'cosmograph' : 'canvas')}
-          style={{ padding:'6px 12px', borderRadius:8, border:'1px solid rgba(255,255,255,0.24)', background:'rgba(255,255,255,0.08)', color:'#fff', fontSize:13 }}
+          style={{ padding:'6px 12px', borderRadius:8, border:'1px solid var(--dt-border)', background:'var(--dt-fill-med)', color:'var(--dt-text)', fontSize:13 }}
         >
           Renderer: {rendererMode === 'canvas' ? 'Canvas' : 'Cosmograph'} (switch)
         </button>
@@ -794,34 +1632,76 @@ export default function App(){
       <Sidebar 
         open={sidebarOpen} 
         onToggle={()=>setSidebarOpen(!sidebarOpen)} 
-        items={(sidebarIndices ? sidebarIndices : Array.from({length: Math.max(0,nodeCount)},(_,i)=>i)).map((i)=>({ index:i, group:(i%8), name: labels[i], title: (metaNodes[i] as any)?.title || null, avatarUrl: avatars[i] }))}
+        items={(sidebarIndices ? sidebarIndices : Array.from({length: Math.max(0,nodeCount)},(_,i)=>i)).map((i)=>({ index:i, group:(i%8), name: labels[i], title: (metaNodes[i] as any)?.title || (metaNodes[i] as any)?.job_title || (metaNodes[i] as any)?.headline || (metaNodes[i] as any)?.role || (metaNodes[i] as any)?.position || null, avatarUrl: avatars[i] }))}
         selectedIndex={selectedIndex}
         onSelect={(i)=>{ setSelectedIndex(i); }} 
         onDoubleSelect={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate: true, ms: 520, zoomMultiplier: 8 }); setSidebarOpen(false); }} 
       />
-      {/* Job title filter */}
-      <div style={{ position:'absolute', top:56, right:360, zIndex:20, display:'flex', gap:8, alignItems:'center' }}>
-        <input placeholder="Filter by job title" value={jobFilter||''} onChange={(e)=> setJobFilter(e.currentTarget.value || null)}
-          style={{ padding:'6px 8px', borderRadius:8, border:'1px solid rgba(255,255,255,0.2)', background:'rgba(255,255,255,0.06)', color:'#fff', width:220 }} />
-        {jobFilter && <button onClick={()=> setJobFilter(null)} style={{ padding:'6px 10px', borderRadius:8, background:'rgba(255,255,255,0.1)', color:'#fff', border:'1px solid rgba(255,255,255,0.2)' }}>Clear</button>}
-      </div>
+      {/* Intro Paths: Top-3 list + Nearby panel */}
+      {introPathsResult && (
+        <div style={{ position:'absolute', left:12, top:56, zIndex:22, display:'flex', gap:12 }}>
+          <div style={{ minWidth:280, background:'var(--dt-bg-elev-1)', border:'1px solid var(--dt-border)', borderRadius:10, padding:10 }}>
+            <div style={{ fontSize:14, fontWeight:700, marginBottom:8 }}>Top Paths</div>
+            <div style={{ display:'grid', gap:6 }}>
+              {introPathsResult.top3.map((p, idx)=>{
+                const active = selectedPathIndex === idx
+                const label = `${p.names.S||('person:'+p.S)} → ${p.names.M||('person:'+p.M)} → ${p.names.T||('person:'+p.T)}`
+                const facts = `p:${p.scores.p.toFixed(3)} • R_SM:${p.scores.R_SM.toFixed(2)} • R_MT:${p.scores.R_MT.toFixed(2)} • ICP:${p.scores.icp.toFixed(1)} • overlap:${p.scores.overlap.toFixed(2)}`
+                return (
+                  <div key={`${p.S}-${p.M}-${p.T}-${idx}`} onClick={()=>{
+                    setSelectedPathIndex(idx)
+                    // Build mask to highlight S, M, T for this path
+                    try {
+                      const tile = latestTileRef.current as any
+                      const n = tile?.count|0
+                      const mask = new Array<boolean>(n).fill(false)
+                      // S at index 0
+                      mask[0] = true
+                      const meta = tile?.meta?.nodes || []
+                      const findIndex = (id:string)=> meta.findIndex((m:any)=> String(m?.id) === String(id))
+                      const mi = findIndex(p.M)
+                      const ti = findIndex(p.T)
+                      if (mi>=0) mask[mi] = true
+                      if (ti>=0) mask[ti] = true
+                      setIntroPathsTileMask(mask)
+                    } catch {}
+                    // Nearby execs for T
+                    fetchNearbyExecsAtCompany({ T: p.T, companyId: introPathsResult.companyId, limit: 5 }).then(setNearbyExecs).catch(()=> setNearbyExecs([]))
+                  }} style={{ cursor:'pointer', padding:'8px 10px', borderRadius:8, background: active ? 'var(--dt-fill-strong)' : 'var(--dt-fill-weak)', border: active ? '1px solid var(--dt-border-strong)' : '1px solid var(--dt-border)' }}>
+                    <div style={{ fontSize:13, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{label}</div>
+                    <div style={{ fontSize:11, opacity:0.8 }}>{facts}</div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+          {Array.isArray(nearbyExecs) && nearbyExecs.length>0 && (
+            <div style={{ minWidth:260, background:'var(--dt-bg-elev-1)', border:'1px solid var(--dt-border)', borderRadius:10, padding:10 }}>
+              <div style={{ fontSize:14, fontWeight:700, marginBottom:8 }}>Nearby Execs</div>
+              <div style={{ display:'grid', gap:6 }}>
+                {nearbyExecs.map((r)=> (
+                  <div key={r.person_id} style={{ padding:'8px 10px', borderRadius:8, background:'var(--dt-fill-weak)', border:'1px solid var(--dt-border)' }}>
+                    <div style={{ fontSize:13 }}>person:{r.person_id}</div>
+                    <div style={{ fontSize:11, opacity:0.82 }}>{[r.title, r.seniority].filter(Boolean).join(' • ') || '—'}</div>
+                    <div style={{ fontSize:11, opacity:0.7 }}>overlap {Math.max(0, Number(r.months_overlap||0)).toFixed(0)}m</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      <HUD profile={profile} profileOpen={profileOpen} />
       <CommandBar
-        onRun={run}
+        onRun={(expression, evaluation)=> run(expression, undefined, evaluation)}
         focus={focus}
         selectedIndex={selectedIndex}
-        nodes={nodeCount}
-        fps={fps}
-        onBack={()=>{ if(cursor>0 && history[cursor]){ const cur=history[cursor]; const prev=history[cursor-1]; setCursor(cursor-1); if (cur?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: -(cur.turn||0) } })); run(prev.id, { pushHistory:false, overrideMove:{ x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } }) } }}
-        onForward={()=>{ if(cursor<history.length-1){ const next=history[cursor+1]; setCursor(cursor+1); if (next?.turn) window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians: next.turn||0 } })); run(next.id, { pushHistory:false, overrideMove:{ x: next?.move?.x||0, y: next?.move?.y||0 } }) } }}
-        canBack={cursor>0}
-        canForward={cursor<history.length-1}
-        onReshape={(mode)=>{ (sceneRef.current as any)?.reshapeLayout?.(mode, { animate:true, ms:520 }) }}
         onSettings={()=>setShowSettings(true)}
       />
       {/* HUD is now replaced by inline controls within CommandBar */}
       {/* demo buttons removed */}
       {err && (
-        <div style={{ position:'absolute', top:52, left:12, right:12, padding:'10px 12px', background:'rgba(200,40,60,0.2)', border:'1px solid rgba(255,80,100,0.35)', color:'#ffbfc9', borderRadius:10, zIndex:11 }}>
+        <div style={{ position:'absolute', top:52, left:12, right:12, padding:'10px 12px', background:'rgba(200,40,60,0.20)', border:'1px solid var(--dt-danger)', color:'#ffbfc9', borderRadius:10, zIndex:11 }}>
           {err}
         </div>
       )}

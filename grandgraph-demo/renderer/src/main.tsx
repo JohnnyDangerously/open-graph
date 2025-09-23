@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import "./App.css";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import LoginScene from "./graph/LoginScene";
@@ -120,49 +121,49 @@ function Root(){
       {showLogin && (
         <div style={{ position:'absolute', left:0, right:0, bottom:0, zIndex:31, display:'flex', justifyContent:'center', pointerEvents:'none' }}>
           {!drawerOpen && (
-            <button onClick={()=>setDrawerOpen(true)} style={{ pointerEvents:'auto', marginBottom:12, padding:'8px 12px', borderRadius:999, background:'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.2)', fontSize:12 }}>Show Controls ▴</button>
+            <button onClick={()=>setDrawerOpen(true)} style={{ pointerEvents:'auto', marginBottom:12, padding:'8px 12px', borderRadius:999, background:'var(--dt-fill-med)', color:'var(--dt-text)', border:'1px solid var(--dt-border)', fontSize:12 }}>Show Controls ▴</button>
           )}
           {drawerOpen && (
-            <div style={{ pointerEvents:'auto', width:'min(96vw, 980px)', background:'rgba(2,6,23,0.9)', border:'1px solid rgba(255,255,255,0.15)', borderTopLeftRadius:14, borderTopRightRadius:14, boxShadow:'0 -18px 80px rgba(0,0,0,0.6)', padding:'12px 14px 16px 14px' }}>
+            <div style={{ pointerEvents:'auto', width:'min(96vw, 980px)', background:'var(--dt-bg-elev-1)', border:'1px solid var(--dt-border)', borderTopLeftRadius:14, borderTopRightRadius:14, boxShadow:'0 -18px 80px rgba(0,0,0,0.6)', padding:'12px 14px 16px 14px' }}>
               <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
-                <div style={{ color:'#fff', fontSize:12, opacity:0.9 }}>Display Controls</div>
-                <button onClick={()=>setDrawerOpen(false)} style={{ padding:'6px 10px', borderRadius:8, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', fontSize:12 }}>Close ▾</button>
+                <div style={{ color:'var(--dt-text)', fontSize:12, opacity:0.9 }}>Display Controls</div>
+                <button onClick={()=>setDrawerOpen(false)} style={{ padding:'6px 10px', borderRadius:8, background:'var(--dt-fill-med)', color:'var(--dt-text)', border:'1px solid var(--dt-border)', fontSize:12 }}>Close ▾</button>
               </div>
               <div style={{ display:'flex', flexWrap:'wrap', gap:12, alignItems:'center' }}>
-                <button onClick={applyPreset} style={{ padding:'10px 14px', borderRadius:10, background:'rgba(38,99,235,0.18)', color:'#cde3ff', border:'1px solid rgba(99,146,255,0.35)', fontSize:12, letterSpacing:0.5, cursor:'pointer' }} title="Apply saved style preset">Blue Sparse Preset</button>
-                <div style={{ display:'flex', alignItems:'center', gap:8, background:'rgba(255,255,255,0.06)', padding:'6px 8px', borderRadius:8, border:'1px solid rgba(255,255,255,0.18)' }}>
-                  <label style={{ fontSize:11, color:'#fff' }}>Nodes</label>
+                <button onClick={applyPreset} style={{ padding:'10px 14px', borderRadius:10, background:'var(--dt-accent)', color:'#fff', border:'1px solid var(--dt-border)', fontSize:12, letterSpacing:0.5, cursor:'pointer' }} title="Apply saved style preset">Blue Sparse Preset</button>
+                <div style={{ display:'flex', alignItems:'center', gap:8, background:'var(--dt-fill-weak)', padding:'6px 8px', borderRadius:8, border:'1px solid var(--dt-border)' }}>
+                  <label style={{ fontSize:11, color:'var(--dt-text)' }}>Nodes</label>
                   <input type="range" min="0.25" max="2.5" step="0.05" value={nodeScale} onChange={(e)=> setNodeScale(parseFloat(e.target.value))} />
                 </div>
-                <div style={{ display:'flex', alignItems:'center', gap:8, background:'rgba(255,255,255,0.06)', padding:'6px 8px', borderRadius:8, border:'1px solid rgba(255,255,255,0.18)' }}>
-                  <label style={{ fontSize:11, color:'#fff' }}>Edges</label>
+                <div style={{ display:'flex', alignItems:'center', gap:8, background:'var(--dt-fill-weak)', padding:'6px 8px', borderRadius:8, border:'1px solid var(--dt-border)' }}>
+                  <label style={{ fontSize:11, color:'var(--dt-text)' }}>Edges</label>
                   <input type="range" min="0" max="1" step="0.02" value={edgeFraction} onChange={(e)=> setEdgeFraction(parseFloat(e.target.value))} />
                 </div>
-                <div style={{ display:'flex', alignItems:'center', gap:8, background:'rgba(255,255,255,0.06)', padding:'6px 8px', borderRadius:8, border:'1px solid rgba(255,255,255,0.18)' }}>
-                  <label style={{ fontSize:11, color:'#fff' }}>Edge Bright</label>
+                <div style={{ display:'flex', alignItems:'center', gap:8, background:'var(--dt-fill-weak)', padding:'6px 8px', borderRadius:8, border:'1px solid var(--dt-border)' }}>
+                  <label style={{ fontSize:11, color:'var(--dt-text)' }}>Edge Bright</label>
                   <input type="range" min="0" max="2" step="0.05" value={edgeAlpha} onChange={(e)=> setEdgeAlpha(parseFloat(e.target.value))} />
                 </div>
-                <div style={{ display:'flex', alignItems:'center', gap:8, background:'rgba(255,255,255,0.06)', padding:'6px 8px', borderRadius:8, border:'1px solid rgba(255,255,255,0.18)' }}>
-                  <label style={{ fontSize:11, color:'#fff' }}>Point Size</label>
+                <div style={{ display:'flex', alignItems:'center', gap:8, background:'var(--dt-fill-weak)', padding:'6px 8px', borderRadius:8, border:'1px solid var(--dt-border)' }}>
+                  <label style={{ fontSize:11, color:'var(--dt-text)' }}>Point Size</label>
                   <input type="range" min="0.5" max="2.5" step="0.05" value={sizeScale} onChange={(e)=> setSizeScale(parseFloat(e.target.value))} />
                 </div>
-                <div style={{ display:'flex', alignItems:'center', gap:8, background:'rgba(255,255,255,0.06)', padding:'6px 8px', borderRadius:8, border:'1px solid rgba(255,255,255,0.18)' }}>
-                  <label style={{ fontSize:11, color:'#fff' }}>Rotation</label>
+                <div style={{ display:'flex', alignItems:'center', gap:8, background:'var(--dt-fill-weak)', padding:'6px 8px', borderRadius:8, border:'1px solid var(--dt-border)' }}>
+                  <label style={{ fontSize:11, color:'var(--dt-text)' }}>Rotation</label>
                   <input type="range" min="0" max="0.2" step="0.005" value={rotSpeed} onChange={(e)=> setRotSpeed(parseFloat(e.target.value))} />
                 </div>
-                <div style={{ display:'flex', alignItems:'center', gap:8, background:'rgba(255,255,255,0.06)', padding:'6px 8px', borderRadius:8, border:'1px solid rgba(255,255,255,0.18)' }}>
-                  <label style={{ fontSize:11, color:'#fff' }}>Edge Color</label>
+                <div style={{ display:'flex', alignItems:'center', gap:8, background:'var(--dt-fill-weak)', padding:'6px 8px', borderRadius:8, border:'1px solid var(--dt-border)' }}>
+                  <label style={{ fontSize:11, color:'var(--dt-text)' }}>Edge Color</label>
                   <input type="color" value={edgeColor} onChange={(e)=> setEdgeColor(e.target.value)} />
                 </div>
                 <div style={{ display:'flex', gap:6, alignItems:'center' }}>
-                  <span style={{ color:'#fff', fontSize:11, opacity:0.9, marginRight:4 }}>Palette</span>
-                  <button onClick={()=> setPalette('whiteBluePurple')} style={{ padding:'6px 8px', borderRadius:8, border:'1px solid rgba(255,255,255,0.18)', background:'rgba(255,255,255,0.06)', color:'#e0c1ff', fontSize:11 }}>W/B/P</button>
-                  <button onClick={()=> setPalette('whiteBlue')} style={{ padding:'6px 8px', borderRadius:8, border:'1px solid rgba(255,255,255,0.18)', background:'rgba(255,255,255,0.06)', color:'#9ecbff', fontSize:11 }}>White/Blue</button>
-                  <button onClick={()=> setPalette('allWhite')} style={{ padding:'6px 8px', borderRadius:8, border:'1px solid rgba(255,255,255,0.18)', background:'rgba(255,255,255,0.06)', color:'#fff', fontSize:11 }}>All White</button>
-                  <button onClick={()=> setPalette('random')} style={{ padding:'6px 8px', borderRadius:8, border:'1px solid rgba(255,255,255,0.18)', background:'rgba(255,255,255,0.06)', color:'#fff', fontSize:11 }}>Random</button>
+                  <span style={{ color:'var(--dt-text)', fontSize:11, opacity:0.9, marginRight:4 }}>Palette</span>
+                  <button onClick={()=> setPalette('whiteBluePurple')} style={{ padding:'6px 8px', borderRadius:8, border:'1px solid var(--dt-border)', background:'var(--dt-fill-weak)', color:'#e0c1ff', fontSize:11 }}>W/B/P</button>
+                  <button onClick={()=> setPalette('whiteBlue')} style={{ padding:'6px 8px', borderRadius:8, border:'1px solid var(--dt-border)', background:'var(--dt-fill-weak)', color:'#9ecbff', fontSize:11 }}>White/Blue</button>
+                  <button onClick={()=> setPalette('allWhite')} style={{ padding:'6px 8px', borderRadius:8, border:'1px solid var(--dt-border)', background:'var(--dt-fill-weak)', color:'var(--dt-text)', fontSize:11 }}>All White</button>
+                  <button onClick={()=> setPalette('random')} style={{ padding:'6px 8px', borderRadius:8, border:'1px solid var(--dt-border)', background:'var(--dt-fill-weak)', color:'var(--dt-text)', fontSize:11 }}>Random</button>
                 </div>
-                <button onClick={()=> setSideHole(v=>!v)} style={{ padding:'8px 10px', borderRadius:10, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', fontSize:12, letterSpacing:0.5, cursor:'pointer' }} title="Toggle side hole">Side Hole: {sideHole ? 'On' : 'Off'}</button>
-                <button onClick={()=> setSectorDensity(v=>!v)} style={{ padding:'8px 10px', borderRadius:10, background:'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', fontSize:12, letterSpacing:0.5, cursor:'pointer' }} title="Toggle non-uniform sectors">Sector Density: {sectorDensity ? 'On' : 'Off'}</button>
+                <button onClick={()=> setSideHole(v=>!v)} style={{ padding:'8px 10px', borderRadius:10, background:'var(--dt-fill-med)', color:'var(--dt-text)', border:'1px solid var(--dt-border)', fontSize:12, letterSpacing:0.5, cursor:'pointer' }} title="Toggle side hole">Side Hole: {sideHole ? 'On' : 'Off'}</button>
+                <button onClick={()=> setSectorDensity(v=>!v)} style={{ padding:'8px 10px', borderRadius:10, background:'var(--dt-fill-med)', color:'var(--dt-text)', border:'1px solid var(--dt-border)', fontSize:12, letterSpacing:0.5, cursor:'pointer' }} title="Toggle non-uniform sectors">Sector Density: {sectorDensity ? 'On' : 'Off'}</button>
               </div>
             </div>
           )}

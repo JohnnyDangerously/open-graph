@@ -1,7 +1,8 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import AnimatedNetworkBubbles from '../ui/AnimatedNetworkBubbles'
 import type { ParsedTile } from './parse'
-import type { GraphSceneHandle, GraphSceneProps } from './types'
+import type { GraphSceneHandle, GraphSceneProps, WorldBounds } from './types'
+import { EDGE_STROKE_BASE, EDGE_STROKE_MAX, MONTHS_NORMALIZER } from '../lib/constants'
 
 type Node = {
   x: number
@@ -22,6 +23,11 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
   const canvasRef = useRef(null as HTMLCanvasElement | null)
   const [tile, setTile] = useState(null as ParsedTile | null)
   const labelsRef = useRef(null as string[] | null)
+  const avatarsRef = useRef(new Map<number, HTMLImageElement>())
+  const avatarUrlRef = useRef<string[] | null>(null)
+  const loadingSetRef = useRef(new Set<number>())
+  const concurrentLoadsRef = useRef(0)
+  const maxConcurrentLoadsRef = useRef(24)
   const [tx, setTx] = useState(0)
   const [ty, setTy] = useState(0)
   const [scale, setScale] = useState(1)
@@ -36,46 +42,53 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
   const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 } as { width: number, height: number, dpr?: number })
   const [showTestToast, setShowTestToast] = useState<string | null>(null)
   const [showBubbles, setShowBubbles] = useState(false)
+  const [highlightDegree, setHighlightDegree] = useState<'all'|'first'|'second'>('all')
   const draggingNodeRef = useRef(null as Node | null)
   const dragLastRef = useRef<{ x: number, y: number } | null>(null)
   const isPanningRef = useRef(false)
   const animFrameRef = useRef(0 as number)
+  const labelHitboxesRef = useRef([] as Array<{ index:number, x:number, y:number, w:number, h:number }>)
+  const labelStrideRef = useRef(7)
+  const lastStrideUpdateRef = useRef(0)
   // Keep latest tile and a short trail of previous graphs (max 2)
   const tileRef = useRef(null as ParsedTile | null)
   useEffect(()=>{ tileRef.current = tile }, [tile])
   const trailRef = useRef([] as Array<{ nodes: Float32Array, size: Float32Array, alpha: Float32Array, edges?: Uint32Array, center:{x:number,y:number}, color:string }>)
+  const apiRef = useRef<any>(null)
   const trailColors = ['#5ec8ff', '#ff8ac2'] // newest → oldest
 
+  const isPersonMode = React.useMemo(()=>{
+    try { return (tile as any)?.meta?.mode === 'person' } catch { return false }
+  }, [tile])
+
   const groupStyles = React.useMemo<Record<number, { fill: string; glow: string; border: string; base: number; min: number }>>(() => ({
-    0: { fill: 'rgba(243, 93, 143, 0.92)', glow: 'rgba(243, 93, 143, 0.24)', border: 'rgba(173, 44, 89, 0.95)', base: 2.4, min: 0.9 },
-    1: { fill: 'rgba(255, 211, 105, 0.9)', glow: 'rgba(255, 211, 105, 0.22)', border: 'rgba(188, 140, 24, 0.95)', base: 2.6, min: 1.0 },
-    2: { fill: 'rgba(74, 215, 209, 0.9)', glow: 'rgba(74, 215, 209, 0.22)', border: 'rgba(28, 152, 150, 0.95)', base: 2.4, min: 0.9 }
+    0: { fill: 'rgba(243, 93, 143, 0.92)', glow: 'rgba(243, 93, 143, 0.24)', border: 'rgba(173, 44, 89, 0.95)', base: 3.6, min: 1.4 },
+    1: { fill: 'rgba(255, 211, 105, 0.9)', glow: 'rgba(255, 211, 105, 0.22)', border: 'rgba(188, 140, 24, 0.95)', base: 3.9, min: 1.6 },
+    2: { fill: 'rgba(74, 215, 209, 0.9)', glow: 'rgba(74, 215, 209, 0.22)', border: 'rgba(28, 152, 150, 0.95)', base: 3.6, min: 1.4 }
   }), [])
+
+  // Deterministic string hash (FNV-1a 32-bit) to sample labels stably
+  const hashStr32 = React.useCallback((s: string) => {
+    let h = 2166136261 >>> 0
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i)
+      h = Math.imul(h, 16777619) >>> 0
+    }
+    return h >>> 0
+  }, [])
 
   const computeNodeRadius = React.useCallback((node: Node, scaleValue: number) => {
     // Keep nodes a constant screen-space size (no resize on zoom)
     const style = groupStyles[node.group as 0|1|2] || groupStyles[1]
-    const sizeFactor = 0.40 + Math.min(0.9, Math.max(0.12, node.size * 0.45))
-    const globalShrink = 1.5 // 3x larger than previous constant size
-    return Math.max(
-      style.min * 0.5,
-      style.base * 0.5 * sizeFactor * globalShrink
-    )
+    const sizeFactor = 0.56 + Math.min(0.9, Math.max(0.20, node.size * 0.55))
+    const globalShrink = 3.2
+    const r = Math.max(style.min * 0.72, style.base * 0.58 * sizeFactor * globalShrink)
+    return Math.max(7, r)
   }, [groupStyles])
 
   // Convert tile data to nodes/edges
   const { nodes, edges } = React.useMemo((): { nodes: Node[], edges: Edge[] } => {
     if (!tile) return { nodes: [], edges: [] }
-    
-    console.log('CanvasScene: Processing tile:', {
-      count: tile.count,
-      nodesLength: tile.nodes?.length,
-      sizeLength: tile.size?.length,
-      alphaLength: tile.alpha?.length,
-      edgesLength: tile.edges?.length,
-      firstNode: tile.nodes?.slice(0,4),
-      firstEdge: tile.edges?.slice(0,4)
-    })
     
     const nodes: Node[] = []
     for (let i = 0; i < tile.count; i++) {
@@ -88,11 +101,6 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
         group: tile.group ? tile.group[i] : 0
       }
       nodes.push(node)
-      
-      // Log first few nodes for debugging
-      if (i < 5) {
-        console.log(`Node ${i}:`, node)
-      }
     }
     
     const edges: Edge[] = []
@@ -105,10 +113,7 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
           weight: tile.edgeWeights ? tile.edgeWeights[edgeIndex] ?? 1 : 1
         })
       }
-      console.log(`Created ${edges.length} edges`)
     }
-    
-    console.log(`CanvasScene: Created ${nodes.length} nodes, ${edges.length} edges`)
     return { nodes, edges }
   }, [tile])
 
@@ -117,17 +122,34 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
 
   useImperativeHandle(ref, () => ({
     setForeground: (fg: ParsedTile, opts?: { noTrailSnapshot?: boolean }) => {
-      console.log('CanvasScene setForeground: Received fg:', {
-        count: fg?.count,
-        nodesLength: fg?.nodes?.length,
-        sizeLength: fg?.size?.length,
-        alphaLength: fg?.alpha?.length,
-        edgesLength: fg?.edges?.length,
-        firstNodes: fg?.nodes?.slice(0,8),
-        firstSizes: fg?.size?.slice(0,4)
-      })
-      // Snapshot current tile into the trail (max 2) unless suppressed
-      if (!opts?.noTrailSnapshot) {
+      // Determine if incoming tile is effectively the same graph (avoid creating a new off-screen copy)
+      const isSameGraph = (() => {
+        try {
+          const prev:any = tileRef.current
+          if (!prev || !prev.nodes || !fg || !(fg as any).nodes) return false
+          if ((fg as any).count !== prev.count) return false
+          const a = (fg as any).nodes as Float32Array
+          const b = prev.nodes as Float32Array
+          if (!a || !b || a.length !== b.length) return false
+          // Cheap equality check: compare first 64 coordinates and overall bounding box
+          const sample = Math.min(a.length, 128)
+          let diffSum = 0
+          for (let i=0;i<sample;i++){ diffSum += Math.abs(a[i] - b[i]) }
+          if (diffSum < 1e-3) return true
+          const bounds = (arr: Float32Array)=>{
+            let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity
+            for (let i=0;i<arr.length;i+=2){ const x=arr[i], y=arr[i+1]; if (!Number.isFinite(x)||!Number.isFinite(y)) continue; if (x<minX) minX=x; if (x>maxX) maxX=x; if (y<minY) minY=y; if (y>maxY) maxY=y }
+            return { minX, maxX, minY, maxY }
+          }
+          const ba = bounds(a), bb = bounds(b)
+          const wdiff = Math.abs((ba.maxX-ba.minX) - (bb.maxX-bb.minX))
+          const hdiff = Math.abs((ba.maxY-ba.minY) - (bb.maxY-bb.minY))
+          return (wdiff < 1e-3 && hdiff < 1e-3)
+        } catch { return false }
+      })()
+
+      // Snapshot current tile into the trail (max 2) unless suppressed or same graph
+      if (!opts?.noTrailSnapshot && !isSameGraph) {
         try {
           const prev = tileRef.current as any
           if (prev && prev.nodes && prev.size && prev.alpha) {
@@ -144,52 +166,97 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
             for (let i=0;i<nextTrail.length;i++) nextTrail[i].color = trailColors[i] || '#88a'
             trailRef.current = nextTrail
           }
-        } catch (e) { console.warn('Trail snapshot failed', e) }
+        } catch {}
       }
-      setTile(fg)
-      try { labelsRef.current = (fg as any).labels || null } catch {}
-      // Reset view and auto-fit the new data
-      setTx(0)
-      setTy(0)
-      setScale(1)
-      const hasCohorts = !!(fg as any)?.group && ((fg as any).group as Uint16Array).length > 0 && (() => {
+      // Compute previous center if any (skip offset if same graph)
+      let hasPrev = false
+      let prevCenter = { x: 0, y: 0 }
+      try {
+        const prev:any = tileRef.current
+        if (prev) {
+          hasPrev = true
+          if (prev?.focusWorld && typeof prev.focusWorld.x==='number') prevCenter = { x: prev.focusWorld.x, y: prev.focusWorld.y }
+          else if (prev?.nodes && prev.nodes.length>=2) prevCenter = { x: prev.nodes[0]||0, y: prev.nodes[1]||0 }
+        }
+      } catch {}
+
+      // Shift incoming tile to the RIGHT of previous center and align Y, then set as foreground
+      const next:any = fg as any
+      try {
+        let newCenter = { x: 0, y: 0 }
+        if (next?.focusWorld && typeof next.focusWorld.x==='number') newCenter = { x: next.focusWorld.x, y: next.focusWorld.y }
+        else if (next?.nodes && next.nodes.length>=2) newCenter = { x: next.nodes[0]||0, y: next.nodes[1]||0 }
+        if (hasPrev && !isSameGraph) {
+          // Compute dynamic spacing: half-width(prev) + half-width(next) + padding
+          const bounds = (arr: Float32Array)=>{
+            let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity
+            for (let i=0;i<arr.length;i+=2){ const x=arr[i], y=arr[i+1]; if (!Number.isFinite(x)||!Number.isFinite(y)) continue; if (x<minX) minX=x; if (x>maxX) maxX=x; if (y<minY) minY=y; if (y>maxY) maxY=y }
+            return { minX, maxX, minY, maxY, width: (maxX-minX)||0, height: (maxY-minY)||0 }
+          }
+          const prev:any = tileRef.current
+          const bPrev = prev?.nodes ? bounds(prev.nodes as Float32Array) : { width: 0 }
+          const bNext = next?.nodes ? bounds(next.nodes as Float32Array) : { width: 0 }
+          const padding = 260
+          const dist = Math.max(1200, (bPrev.width*0.5) + (bNext.width*0.5) + padding)
+          const target = { x: prevCenter.x + dist, y: prevCenter.y }
+          const dx = target.x - newCenter.x
+          const dy = target.y - newCenter.y
+          const n = (next?.count|0)
+          for (let i=0;i<n;i++){ next.nodes[i*2] += dx; next.nodes[i*2+1] += dy }
+          next.focusWorld = { x: target.x, y: target.y }
+          next.spawn = { x: dx, y: dy }
+        }
+      } catch {}
+
+      setTile(next as ParsedTile)
+      try { labelsRef.current = (next as any).labels || null } catch {}
+      try {
+        const urls: (string|null|undefined)[] | undefined = (next as any)?.meta?.nodes ? (next as any).meta.nodes.map((n:any)=> n?.avatar_url || n?.avatarUrl || null) : undefined
+        avatarUrlRef.current = Array.isArray(urls) ? urls.map(u=>u||'') as string[] : null
+        avatarsRef.current.clear()
+        loadingSetRef.current.clear()
+        concurrentLoadsRef.current = 0
         try {
-          const g = new Set(Array.from((fg as any).group as Uint16Array))
+          const hasAny = Array.isArray(avatarUrlRef.current) && avatarUrlRef.current.some((u)=> typeof u === 'string' && u.length>0)
+          if (!hasAny) console.log('CanvasScene: No avatar URLs present in incoming tile meta')
+        } catch {}
+      } catch {}
+      const hasCohorts = !!(next as any)?.group && ((next as any).group as Uint16Array).length > 0 && (() => {
+        try {
+          const g = new Set(Array.from((next as any).group as Uint16Array))
           return g.has(0) && g.has(1) && g.has(2)
         } catch { return false }
       })()
-      // Start fully zoomed out and centered: use larger padding to compute bounds, then set target zoom to minimal
-      const preferredPadding = hasCohorts ? 140 : 180
-      const zoomMultiplier = 0.15 // start much farther zoomed out after fit
-      setTimeout(() => {
-        console.log('About to call fitToContent...')
-        fitToContent(preferredPadding)
-        try {
-          // Wait two more frames so fitToContent state is applied
-          requestAnimationFrame(()=>{
+      if (!hasPrev) {
+        // First graph: reset, fit, then ease to a far zoom
+        setTx(0); setTy(0); setScale(1)
+        const preferredPadding = hasCohorts ? 140 : 180
+        const zoomMultiplier = 0.15
+        setTimeout(() => {
+          fitToContent(preferredPadding)
+          try {
             requestAnimationFrame(()=>{
-              const spawn = (fg as any).spawn
-              const focusWorld = (fg as any).focusWorld
-              // Fallback to center node from incoming tile if no explicit focus target
-              const fallbackX = Array.isArray((fg as any).nodes) ? (fg as any).nodes[0] : undefined
-              const fallbackY = Array.isArray((fg as any).nodes) ? (fg as any).nodes[1] : undefined
-              const wantFocus = (focusWorld && typeof focusWorld.x === 'number' && typeof focusWorld.y === 'number')
-                ? focusWorld
-                : (typeof fallbackX === 'number' && typeof fallbackY === 'number' ? { x: fallbackX, y: fallbackY } : null)
-              const currentScale = scaleRef.current || 1
-              // After fitToContent, jump directly to far-zoomed view
-              const targetZoom = Math.min(3.0, Math.max(0.05, currentScale * zoomMultiplier))
-              if (focusWorld && typeof focusWorld.x === 'number' && typeof focusWorld.y === 'number'){
-                centerOnWorld(0, 0, { animate: true, ms: 520, zoom: targetZoom })
-              } else if (spawn && typeof spawn.x === 'number' && typeof spawn.y === 'number'){
-                centerOnWorld(0, 0, { animate: true, ms: 460, zoom: targetZoom })
-              } else if (wantFocus) {
-                centerOnWorld(0, 0, { animate: true, ms: 480, zoom: targetZoom })
-              }
+              requestAnimationFrame(()=>{
+                const focusWorld = (next as any).focusWorld
+                const fallbackX = Array.isArray((next as any).nodes) ? (next as any).nodes[0] : undefined
+                const fallbackY = Array.isArray((next as any).nodes) ? (next as any).nodes[1] : undefined
+                const wantFocus = (focusWorld && typeof focusWorld.x === 'number' && typeof focusWorld.y === 'number') ? focusWorld : (typeof fallbackX === 'number' && typeof fallbackY === 'number' ? { x: fallbackX, y: fallbackY } : null)
+                const currentScale = scaleRef.current || 1
+                const targetZoom = Math.min(3.0, Math.max(0.05, currentScale * zoomMultiplier))
+                if (wantFocus) centerOnWorld(0, 0, { animate: true, ms: 480, zoom: targetZoom })
+              })
             })
-          })
+          } catch {}
+        }, 200)
+      } else {
+        // Subsequent graphs: keep zoom, pan smoothly to new center
+        try {
+          const f:any = (next as any).focusWorld
+          if (f && typeof f.x==='number' && typeof f.y==='number') {
+            requestAnimationFrame(()=> centerOnWorld(f.x, f.y, { animate: true, ms: 600 }))
+          }
         } catch {}
-      }, 200)
+      }
     },
     promoteTrailPrevious: (): boolean => {
       try {
@@ -240,7 +307,7 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
           })
         }, 120)
         return true
-      } catch (e) { console.warn('promoteTrailPrevious failed', e); return false }
+      } catch { return false }
     },
     clear: () => {
       setTile(null)
@@ -261,7 +328,6 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       // Clamp to safe render bounds
       targetScale = Math.max(0.2, Math.min(3.5, targetScale))
       const { width:w, height:h } = getCanvasLogicalSize()
-      console.log('focusIndex:', { index, targetScale, canvasSize: `${w}x${h}`, nodeWorld: { x:n.x, y:n.y } })
       centerOnWorld(n.x, n.y, { zoom: targetScale, animate: !!opts?.animate, ms: opts?.ms })
     },
     reshapeLayout: (mode: 'hierarchy'|'radial'|'grid'|'concentric', opts?:{ animate?: boolean, ms?: number })=>{
@@ -363,7 +429,76 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
         setTile(next)
       }
     }
+    ,
+    getCamera: () => {
+      const { width, height } = getCanvasLogicalSize()
+      const vp: WorldBounds = {
+        minX: (-txRef.current) / (scaleRef.current||1),
+        maxX: (width - txRef.current) / (scaleRef.current||1),
+        minY: (-tyRef.current) / (scaleRef.current||1),
+        maxY: (height - tyRef.current) / (scaleRef.current||1),
+        width: 0, height: 0, center: { x: 0, y: 0 }
+      }
+      vp.width = vp.maxX - vp.minX
+      vp.height = vp.maxY - vp.minY
+      vp.center = { x: (vp.minX + vp.maxX)/2, y: (vp.minY + vp.maxY)/2 }
+      return { scale: scaleRef.current||1, tx: txRef.current, ty: tyRef.current, viewportCss: { width, height }, viewportWorld: vp }
+    },
+    measureForegroundBounds: (opts?: { mask?: boolean[] | null, groupId?: number | null, dropPercentile?: number }): WorldBounds | null => {
+      const t = tileRef.current
+      if (!t) return null
+      const n = t.count|0
+      const mask = (opts?.mask && opts.mask.length===n) ? opts?.mask : visibleMaskRef.current
+      const wantGroup = typeof opts?.groupId === 'number' ? opts?.groupId : null
+      const xs: number[] = []
+      const ys: number[] = []
+      for (let i=0;i<n;i++){
+        if (mask && mask.length===n && !mask[i]) continue
+        if (wantGroup !== null) { const g = (t as any).group ? (t as any).group[i] : null; if (g !== wantGroup) continue }
+        const x = t.nodes[i*2], y = t.nodes[i*2+1]
+        if (Number.isFinite(x) && Number.isFinite(y)) { xs.push(x); ys.push(y) }
+      }
+      if (!xs.length) return null
+      const drop = Math.max(0, Math.min(40, Math.floor((opts?.dropPercentile||0))))
+      const takeRange = (arr:number[])=>{
+        if (!drop) return { min: Math.min(...arr), max: Math.max(...arr) }
+        const sorted = [...arr].sort((a,b)=>a-b)
+        const k = Math.floor(sorted.length * (drop/100))
+        const min = sorted[Math.min(sorted.length-1, k)]
+        const max = sorted[Math.max(0, sorted.length-1-k)]
+        return { min, max }
+      }
+      const rx = takeRange(xs), ry = takeRange(ys)
+      const out: WorldBounds = {
+        minX: rx.min, maxX: rx.max,
+        minY: ry.min, maxY: ry.max,
+        width: rx.max - rx.min,
+        height: ry.max - ry.min,
+        center: { x: (rx.min+rx.max)/2, y: (ry.min+ry.max)/2 }
+      }
+      return out
+    },
+    measureGroupBounds: (groupId: number, opts?: { mask?: boolean[] | null, dropPercentile?: number }): WorldBounds | null => {
+      const api: any = apiRef.current
+      return api?.measureForegroundBounds?.({ mask: opts?.mask ?? null, groupId, dropPercentile: opts?.dropPercentile }) || null
+    },
+    getVisibilityForBounds: (bounds: WorldBounds) => {
+      const api: any = apiRef.current
+      const cam = api?.getCamera?.()
+      if (!cam) return { visibleFraction: 0, viewport: { ...bounds } as any }
+      const vp = cam.viewportWorld
+      const ixMin = Math.max(bounds.minX, vp.minX)
+      const iyMin = Math.max(bounds.minY, vp.minY)
+      const ixMax = Math.min(bounds.maxX, vp.maxX)
+      const iyMax = Math.min(bounds.maxY, vp.maxY)
+      const interW = Math.max(0, ixMax - ixMin)
+      const interH = Math.max(0, iyMax - iyMin)
+      const visibleFraction = Math.max(0, Math.min(1, (interW * interH) / Math.max(1, bounds.width * bounds.height)))
+      return { visibleFraction, viewport: vp }
+    }
   }), [])
+
+  useEffect(()=>{ apiRef.current = (ref as any)?.current }, [ref])
 
   function animatePan(fromTx:number, fromTy:number, toTx:number, toTy:number, ms:number){
     const start = performance.now()
@@ -377,7 +512,6 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       // Emit parallax event for background (include easing t)
       try { window.dispatchEvent(new CustomEvent('graph_pan', { detail: { t, tx: nx, ty: ny }})) } catch {}
       if (t < 1) requestAnimationFrame(step)
-      else console.log('Pan complete:', { fromTx, fromTy, toTx, toTy, finalTx: nx, finalTy: ny })
     }
     requestAnimationFrame(step)
   }
@@ -466,17 +600,8 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
   function fitToContent(padding = 140) {
     const canvas = canvasRef.current
     if (!canvas || nodes.length === 0) {
-      console.log('fitToContent: no canvas or nodes', { canvas: !!canvas, nodeCount: nodes.length })
       return
     }
-    
-    console.log('fitToContent: Processing', nodes.length, 'nodes')
-    console.log('First 5 nodes:', nodes.slice(0, 5).map((n: Node, i: number) => ({ 
-      index: i, 
-      x: n.x.toFixed(1), 
-      y: n.y.toFixed(1),
-      distance: Math.sqrt(n.x*n.x + n.y*n.y).toFixed(1)
-    })))
     
     const xs = nodes.map((n:Node) => n.x)
     const ys = nodes.map((n:Node) => n.y)
@@ -484,8 +609,6 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
     const maxX = Math.max(...xs) + padding
     const minY = Math.min(...ys) - padding
     const maxY = Math.max(...ys) + padding
-    
-    console.log('Node bounds with padding:', { minX, maxX, minY, maxY })
     
     // Use logical CSS size, not device pixels
     const w = canvasSize.width
@@ -502,18 +625,9 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
     const newTx = (w / 2) - cx * s
     const newTy = (h / 2) - cy * s
     
-    console.log('fitToContent calculation:', { w, h, sx, sy, finalScale: s, cx, cy, newTx, newTy, dpr: canvasSize.dpr })
-    
     setScale(s)
     setTx(newTx)
     setTy(newTy)
-    
-    console.log('fitToContent result:', { 
-      scale: s, 
-      tx: newTx, 
-      ty: newTy,
-      canvasSize: `${w}x${h}`
-    })
   }
 
   // Canvas resize handling
@@ -533,7 +647,6 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       
       const ctx = canvas.getContext('2d')
       if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      console.log('Canvas resized:', { physical: `${width}x${height}`, logical: `${rect.width}x${rect.height}`, dpr })
     }
     
     const ro = new ResizeObserver(resizeCanvas)
@@ -589,15 +702,48 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
         const leftToBridge = (sourceNode.group === 0 && targetNode.group === 1) || (sourceNode.group === 1 && targetNode.group === 0)
         const rightToBridge = (sourceNode.group === 2 && targetNode.group === 1) || (sourceNode.group === 1 && targetNode.group === 2)
         const bothBridge = sourceNode.group === 1 && targetNode.group === 1
+
+        // Person mode degree classification
+        let deg: 'first' | 'second' | 'other' = 'other'
+        if (isPersonMode) {
+          // center is index 0; first-degree edges are [0, i]; second-degree are [first, second]
+          const isCenterEdge = (edge.source === 0 || edge.target === 0)
+          if (isCenterEdge) deg = 'first'
+          else deg = 'second'
+        }
+
+        // Base stroke color by mode
         let stroke = 'rgba(186, 188, 198, 0.16)'
-        if (leftToBridge) stroke = 'rgba(243, 93, 143, 0.28)'
-        else if (rightToBridge) stroke = 'rgba(74, 215, 209, 0.28)'
-        else if (bothBridge) stroke = 'rgba(255, 211, 105, 0.24)'
+        if (!isPersonMode) {
+          if (leftToBridge) stroke = 'rgba(243, 93, 143, 0.28)'
+          else if (rightToBridge) stroke = 'rgba(74, 215, 209, 0.28)'
+          else if (bothBridge) stroke = 'rgba(255, 211, 105, 0.24)'
+        } else {
+          // Person: color by degree
+          stroke = deg === 'first' ? 'rgba(130, 180, 255, 0.28)' : 'rgba(255, 170, 110, 0.26)'
+        }
 
         // Thicken bridge-to-bridge edges a bit more
         const bridgeLink = bothBridge
-        const weight = Math.max(bridgeLink ? 0.2 : 0.08, Math.min(bridgeLink ? 1.4 : 0.9, edge.weight * (bridgeLink ? 0.18 : 0.10)))
-        ctx.strokeStyle = stroke
+        const norm = Math.max(0, Math.min(1, (edge.weight||0) / MONTHS_NORMALIZER))
+        const scaled = Math.sqrt(norm) // softer growth
+        const base = EDGE_STROKE_BASE
+        const max = EDGE_STROKE_MAX * (bridgeLink ? 1.0 : 0.64)
+        const weight = Math.max(base, Math.min(max, base + scaled * max))
+
+        // Degree highlight toggle: dim non-selected degree
+        if (isPersonMode && highlightDegree !== 'all') {
+          const active = highlightDegree === deg
+          const dim = active ? 1.0 : 0.26
+          const c = stroke.replace(/rgba\(([^)]+)\)/, (_m, inner) => {
+            const parts = inner.split(',').map(s=>s.trim())
+            const a = parseFloat(parts[3] || '1')
+            return `rgba(${parts[0]}, ${parts[1]}, ${parts[2]}, ${Math.max(0, Math.min(1, a * dim))})`
+          })
+          ctx.strokeStyle = c
+        } else {
+          ctx.strokeStyle = stroke
+        }
         ctx.lineWidth = weight
         ctx.beginPath()
         ctx.moveTo(A.x, A.y)
@@ -685,6 +831,16 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
     ctx.restore()
   }
 
+  function drawAvatar(ctx: CanvasRenderingContext2D, image: HTMLImageElement, x:number, y:number, r:number){
+    ctx.save()
+    ctx.beginPath()
+    ctx.arc(x, y, r, 0, Math.PI*2)
+    ctx.closePath()
+    ctx.clip()
+    ctx.drawImage(image, x - r, y - r, r*2, r*2)
+    ctx.restore()
+  }
+
   function draw() {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -695,6 +851,8 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
     const now = performance.now()
     ctx.save()
     ctx.clearRect(0, 0, canvas.width, canvas.height)
+    // reset label hitboxes for this frame
+    labelHitboxesRef.current = []
     
     // Draw trail graphs (older → darker). Render edges then nodes, dimmed.
     try {
@@ -850,6 +1008,50 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
     
     // Draw nodes - People Network style
     let visibleNodes = 0
+    // Pre-count visible label candidates to set dynamic stride relative to on-screen density
+    let visibleLabelCandidates = 0
+    try {
+      const modePre = (tile as any)?.meta?.mode
+      if (labelsRef.current && (modePre === 'person')){
+        for (let i = 0; i < nodes.length; i++){
+          const node = nodes[i]
+          const screen = worldToScreen(node.x, node.y)
+          let radius = computeNodeRadius(node, scale)
+          if (screen.x + radius >= 0 && screen.x - radius <= canvas.width && 
+              screen.y + radius >= 0 && screen.y - radius <= canvas.height) {
+            const isAnchor = (i === 0) || (i === 1)
+            const hasLbl = !!labelsRef.current[i]
+            const isBridge = node.group === 1
+            if (hasLbl && !isAnchor && !isBridge) visibleLabelCandidates++
+          }
+        }
+      }
+    } catch {}
+    // Smooth stride updates to avoid flicker while panning/zooming
+    const dynamicStrideOther = (()=>{
+      const desiredRatio = 8 // target ~1/8 labels for person ego
+      if (visibleLabelCandidates <= 0) return 7
+      // When zoomed-in or sparse: show all labels if small number or ample pixel area per label
+      const pixelArea = canvas.width * canvas.height
+      const areaPerCandidate = pixelArea / Math.max(1, visibleLabelCandidates)
+      const zoomedIn = scale >= 1.1
+      if (visibleLabelCandidates <= 32 || areaPerCandidate >= 28000 || zoomedIn) return 1
+      const target = Math.max(1, Math.floor(visibleLabelCandidates / desiredRatio))
+      const stride = Math.max(1, Math.round(visibleLabelCandidates / Math.max(1, target)))
+      const clamped = Math.max(2, Math.min(12, stride))
+      // debounce updates to at most ~10 Hz and hysteresis of +/-1
+      const nowMs = performance.now()
+      const last = lastStrideUpdateRef.current || 0
+      let prev = labelStrideRef.current || clamped
+      if (nowMs - last > 100) {
+        if (Math.abs(prev - clamped) >= 1) {
+          prev = clamped
+          labelStrideRef.current = prev
+          lastStrideUpdateRef.current = nowMs
+        }
+      }
+      return prev
+    })()
     for (let i = 0; i < nodes.length; i++) {
       const vm = visibleMaskRef.current
       if (vm && vm.length === nodes.length && !vm[i]) continue
@@ -857,6 +1059,7 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       const screen = worldToScreen(node.x, node.y)
       // Constant-size nodes: use computeNodeRadius (ignores scale)
       let radius = computeNodeRadius(node, scale)
+      let renderR = radius
       try { if ((tile as any)?.compareOverlay && (i === 0 || i === 1)) radius = Math.max(radius, 18) } catch {}
       
       // Check if node is visible on screen
@@ -891,28 +1094,71 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       ctx.fillStyle = glow
       ctx.fill()
       
-      // Main node
-      ctx.beginPath()
-      ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2)
-      ctx.fillStyle = fill
-      ctx.fill()
-      
-      // Clean border
-      ctx.strokeStyle = border
-      ctx.lineWidth = 1.5
-      ctx.stroke()
+      // Lazy-load avatar if visible and not loaded
+      if (avatarUrlRef.current && typeof avatarUrlRef.current[i] === 'string' && !avatarsRef.current.has(i)){
+        const url = avatarUrlRef.current[i]
+        if (url && !loadingSetRef.current.has(i) && concurrentLoadsRef.current < maxConcurrentLoadsRef.current){
+          loadingSetRef.current.add(i)
+          concurrentLoadsRef.current++
+          const img = new Image(); img.crossOrigin = 'anonymous'; img.referrerPolicy = 'no-referrer'
+          img.onload = ()=>{ avatarsRef.current.set(i, img); loadingSetRef.current.delete(i); concurrentLoadsRef.current = Math.max(0, concurrentLoadsRef.current-1) }
+          img.onerror = ()=>{ loadingSetRef.current.delete(i); concurrentLoadsRef.current = Math.max(0, concurrentLoadsRef.current-1) }
+          img.src = url
+        }
+      }
+
+      // Avatar (if available) or fallback solid node
+      const avatar = avatarsRef.current.get(i)
+      if (avatar) {
+        // Near max zoom, scale avatars up to 3x while keeping base size at normal zooms
+        const maxScale = 3.5
+        const startBoost = maxScale * 0.75 // begin enlarging at last 25% of zoom range
+        const s = Math.max(0, Math.min(1, (scale - startBoost) / Math.max(0.0001, (maxScale - startBoost))))
+        const avatarMul = 1 + 3.5 * s // 1x → 4.5x
+        const avatarR = Math.max(10, radius * avatarMul)
+        renderR = avatarR
+        drawAvatar(ctx, avatar, screen.x, screen.y, avatarR)
+        ctx.beginPath(); ctx.arc(screen.x, screen.y, avatarR, 0, Math.PI*2)
+        ctx.strokeStyle = 'rgba(255,255,255,0.6)'
+        ctx.lineWidth = 1
+        ctx.stroke()
+      } else {
+        // Main node
+        ctx.beginPath()
+        ctx.arc(screen.x, screen.y, renderR, 0, Math.PI * 2)
+        ctx.fillStyle = fill
+        ctx.fill()
+        
+        // Clean border
+        ctx.strokeStyle = border
+        ctx.lineWidth = 1.5
+        ctx.stroke()
+      }
+      // Universal crisp white outline to help nodes stand out (avatars and solids)
+      try {
+        ctx.beginPath()
+        ctx.arc(screen.x, screen.y, renderR + 0.8, 0, Math.PI * 2)
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+        ctx.lineWidth = 1.8
+        ctx.stroke()
+      } catch {}
       
       // Selection highlight: pulsing halo + ring
       if (isSelected) {
         const pulse = (Math.sin(now / 180) + 1) * 0.5 // 0..1
-        const haloR = radius + 8 + pulse * 6
+        // Scale selector proportionally to zoom ramp used for avatars
+        const maxScale = 3.5
+        const startBoost = maxScale * 0.75
+        const s = Math.max(0, Math.min(1, (scale - startBoost) / Math.max(0.0001, (maxScale - startBoost))))
+        const padMul = 1 + 0.8 * s
+        const haloR = renderR + 8 * padMul + pulse * (6 * padMul)
         ctx.beginPath()
         ctx.arc(screen.x, screen.y, haloR, 0, Math.PI * 2)
         ctx.strokeStyle = 'rgba(255,255,255,0.85)'
         ctx.lineWidth = 2
         ctx.stroke()
         ctx.beginPath()
-        ctx.arc(screen.x, screen.y, haloR + 3, 0, Math.PI * 2)
+        ctx.arc(screen.x, screen.y, haloR + 3 * padMul, 0, Math.PI * 2)
         ctx.strokeStyle = 'rgba(255,255,255,0.35)'
         ctx.lineWidth = 2
         ctx.stroke()
@@ -920,11 +1166,32 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       
       ctx.restore()
 
-      // Labels: always show bridge names; show side names when zoomed in
+      // Labels: always show selected or center/anchor label; bridges ~1/7 sampled; person ego ~1/8 relative to on-screen candidates; others ~1/4 (deterministic by label hash)
       if (labelsRef.current && labelsRef.current[i]){
         const isBridge = node.group === 1
-        const show = isBridge ? true : (scale > 1.6)
-        if (show) drawLabel(ctx, labelsRef.current[i], screen.x, screen.y - radius - 12)
+        const isAnchor = (i === 0) || (i === 1)
+        const mode = (tile as any)?.meta?.mode
+        const strideOther = mode === 'person' ? dynamicStrideOther : 4
+        const strideBridge = 7
+        const lbl = labelsRef.current[i]
+        const pickOther = ((hashStr32(lbl) + i) % strideOther) === 0
+        const pickBridge = ((hashStr32(lbl) + i) % strideBridge) === 0
+        const isSelected = typeof props.selectedIndex === 'number' && props.selectedIndex === i
+        const show = isSelected || isAnchor || (isBridge ? pickBridge : pickOther)
+        if (show) {
+          // Draw label
+          const centerX = screen.x
+          const centerY = screen.y - renderR - 12
+          drawLabel(ctx, labelsRef.current[i], centerX, centerY)
+          // Record hitbox for click handling
+          try {
+            const pad = 4
+            const m = ctx.measureText(labelsRef.current[i])
+            const w = (m?.width || 0) + pad*2
+            const h = 16
+            labelHitboxesRef.current.push({ index: i, x: centerX - w/2, y: centerY - h/2, w, h })
+          } catch {}
+        }
       }
     }
     
@@ -958,6 +1225,52 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
     const canvas = canvasRef.current
     if (!canvas) return
 
+    const onDblClick = (e: MouseEvent) => {
+      try {
+        const rect = canvas.getBoundingClientRect()
+        const sx = e.clientX - rect.left
+        const sy = e.clientY - rect.top
+        const hit = pickNode(sx, sy)
+        if (!hit) return
+        const idx = hit.index
+        const t: any = tileRef.current as any
+        // Derive raw id from meta or labels
+        let rawId: string | null = null
+        try {
+          const metaNode = t?.meta?.nodes?.[idx]
+          if (metaNode && (metaNode.id != null || metaNode.linkedin_id != null || metaNode.handle != null)) {
+            rawId = String(metaNode.id ?? metaNode.linkedin_id ?? metaNode.handle)
+          }
+        } catch {}
+        if (!rawId) {
+          try {
+            const lbl = (labelsRef.current && Array.isArray(labelsRef.current)) ? labelsRef.current[idx] : null
+            if (lbl && /^(company|person):\d+$/i.test(lbl)) rawId = lbl
+          } catch {}
+        }
+        if (!rawId) return
+        // Canonicalize id
+        const mode = t?.meta?.mode as string | undefined
+        const grp = (Array.isArray((t as any)?.group) ? (t as any).group[idx] : (t as any)?.group?.[idx])
+        let canonical = rawId
+        if (/^(company|person):\d+$/i.test(rawId)) {
+          canonical = rawId.toLowerCase()
+        } else if (/^\d+$/.test(rawId)) {
+          if (mode === 'graph') {
+            canonical = (grp === 1) ? `person:${rawId}` : `company:${rawId}`
+          } else if (mode === 'person') {
+            canonical = `person:${rawId}`
+          } else if (mode === 'flows') {
+            canonical = (idx === 0 || idx === 1) ? `company:${rawId}` : ''
+          } else {
+            canonical = `person:${rawId}`
+          }
+        }
+        if (!canonical) return
+        window.dispatchEvent(new CustomEvent('crux_insert', { detail: { text: canonical } }))
+      } catch {}
+    }
+
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
       const isZoomGesture = e.ctrlKey || e.metaKey || e.altKey
@@ -986,34 +1299,49 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       const rect = canvas.getBoundingClientRect()
       const sx = e.clientX - rect.left
       const sy = e.clientY - rect.top
-      // Region hit test (compare mode)
-      try {
-        const ov: any = (tile as any)?.compareOverlay
-        if (ov && ov.regions) {
-          const px = sx, py = sy
-          const inside = (r:any)=>{
-            const c = worldToScreen(r.cx||0, r.cy||0)
-            const dx = px - c.x, dy = py - c.y
-            const d = Math.hypot(dx, dy)
-            const rIn = Math.max(0, (r.r1||0) * scale)
-            const rOut = Math.max(rIn+1, (r.r2||0) * scale)
-            const topHalf = py <= c.y + 1
-            return topHalf && d >= rIn && d <= rOut
-          }
-          const hitLeft = ov.regions.left && inside(ov.regions.left)
-          const hitRight = ov.regions.right && inside(ov.regions.right)
-          const hitOverlap = ov.regions.overlap && inside(ov.regions.overlap)
-          if (hitOverlap) { props.onRegionClick?.('overlap'); return }
-          if (hitLeft && !hitRight) { props.onRegionClick?.('left'); return }
-          if (hitRight && !hitLeft) { props.onRegionClick?.('right'); return }
-        }
-      } catch {}
+      // Prefer node picking first so clicks on nodes don't trigger region reset
       const hit = pickNode(sx, sy)
       
       if (hit) {
         draggingNodeRef.current = hit
         if (props.onPick) props.onPick(hit.index)
       } else {
+        // If not on a node, check label hitboxes
+        try {
+          for (let k = labelHitboxesRef.current.length - 1; k >= 0; k--) {
+            const hb = labelHitboxesRef.current[k]
+            if (sx >= hb.x && sx <= hb.x + hb.w && sy >= hb.y && sy <= hb.y + hb.h) {
+              if (props.onPick) props.onPick(hb.index)
+              // Also focus the clicked node for better UX
+              const curNodes = nodesRef.current
+              const n = curNodes?.[hb.index]
+              if (n) centerOnWorld(n.x, n.y, { animate: true, ms: 420, zoom: Math.min(3.0, Math.max(0.4, (scaleRef.current||1) * 1.2)) })
+              return
+            }
+          }
+        } catch {}
+        // Region hit test (compare mode) only when not clicking a node
+        try {
+          const ov: any = (tile as any)?.compareOverlay
+          if (ov && ov.regions) {
+            const px = sx, py = sy
+            const inside = (r:any)=>{
+              const c = worldToScreen(r.cx||0, r.cy||0)
+              const dx = px - c.x, dy = py - c.y
+              const d = Math.hypot(dx, dy)
+              const rIn = Math.max(0, (r.r1||0) * scale)
+              const rOut = Math.max(rIn+1, (r.r2||0) * scale)
+              const topHalf = py <= c.y + 1
+              return topHalf && d >= rIn && d <= rOut
+            }
+            const hitLeft = ov.regions.left && inside(ov.regions.left)
+            const hitRight = ov.regions.right && inside(ov.regions.right)
+            const hitOverlap = ov.regions.overlap && inside(ov.regions.overlap)
+            if (hitOverlap) { props.onRegionClick?.('overlap'); return }
+            if (hitLeft && !hitRight) { props.onRegionClick?.('left'); return }
+            if (hitRight && !hitLeft) { props.onRegionClick?.('right'); return }
+          }
+        } catch {}
         isPanningRef.current = true
       }
       
@@ -1063,11 +1391,9 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       } else if (e.key === '-') {
         setScale((s: number) => Math.max(0.02, s * 0.9))
       } else if (e.key === 'r' || e.key === 'R') {
-        console.log('R key pressed - fitting content')
         fitToContent()
       } else if (e.key === 'c' || e.key === 'C') {
         // Center view manually
-        console.log('C key pressed - centering view')
         setTx(0)
         setTy(0)
         setScale(100)
@@ -1083,6 +1409,7 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
 
     canvas.addEventListener('wheel', onWheel, { passive: false })
     canvas.addEventListener('pointerdown', onDown)
+    canvas.addEventListener('dblclick', onDblClick)
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
     window.addEventListener('keydown', onKeyDown)
@@ -1090,6 +1417,7 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
     return () => {
       canvas.removeEventListener('wheel', onWheel)
       canvas.removeEventListener('pointerdown', onDown)
+      canvas.removeEventListener('dblclick', onDblClick)
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('keydown', onKeyDown)
@@ -1121,6 +1449,14 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
         >
           {showBubbles ? 'Hide' : 'Show'} Feature
         </button>
+        {isPersonMode && (
+          <div style={{ display:'flex', gap:6, alignItems:'center' }}>
+            <span style={{ color:'#aaa', fontSize:12 }}>Highlight:</span>
+            <button onClick={()=> setHighlightDegree('all')} style={{ padding:'4px 8px', borderRadius:8, background: highlightDegree==='all'?'rgba(120,180,255,0.22)':'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', fontSize:12 }}>All</button>
+            <button onClick={()=> setHighlightDegree('first')} style={{ padding:'4px 8px', borderRadius:8, background: highlightDegree==='first'?'rgba(120,180,255,0.22)':'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', fontSize:12 }}>1st</button>
+            <button onClick={()=> setHighlightDegree('second')} style={{ padding:'4px 8px', borderRadius:8, background: highlightDegree==='second'?'rgba(255,170,110,0.22)':'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', fontSize:12 }}>2nd</button>
+          </div>
+        )}
         {showTestToast && (
           <div style={{ padding:'4px 6px', borderRadius:8, background:'rgba(10,10,20,0.70)', color:'#d5ffd5', border:'1px solid rgba(120,255,180,0.35)', fontSize:12 }}>
             {showTestToast}

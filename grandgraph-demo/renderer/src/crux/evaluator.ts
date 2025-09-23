@@ -41,8 +41,9 @@ interface IntentContext {
   warnings: string[]
 }
 
-const DEFAULT_COMPARE_FIRST_MONTHS = 24
-const DEFAULT_COMPARE_SECOND_MONTHS = 36
+import { MIN_OVERLAP_MONTHS } from '../lib/constants'
+const DEFAULT_COMPARE_FIRST_MONTHS = MIN_OVERLAP_MONTHS
+const DEFAULT_COMPARE_SECOND_MONTHS = MIN_OVERLAP_MONTHS
 
 function nodeIdFor(tile: ParsedTile, i: number): string {
   const meta: any = (tile as any)?.meta?.nodes?.[i]
@@ -272,12 +273,16 @@ export async function evaluate(text: string, opts?: EvaluateOptions): Promise<Ev
     const op = (opStep.operator as OperatorToken).op
     try {
       if (op === '^' || op === 'bridge') {
+        // Allow abort to cancel heavy preview fetches
+        if (opts?.signal?.aborted) throw new DOMException('Aborted','AbortError')
         viewModel = await evaluateBridge(intent, opStep, filters)
         inferredView = 'graph'
       } else if (op === '><' || op === 'compare') {
+        if (opts?.signal?.aborted) throw new DOMException('Aborted','AbortError')
         viewModel = await evaluateCompare(intent, opStep)
         inferredView = 'list'
       } else if (op === '*' || op === 'migration') {
+        if (opts?.signal?.aborted) throw new DOMException('Aborted','AbortError')
         viewModel = await evaluateMigration(intent, opStep, filters)
         inferredView = 'flows'
       }
