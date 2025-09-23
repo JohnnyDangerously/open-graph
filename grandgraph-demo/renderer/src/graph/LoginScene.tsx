@@ -44,10 +44,12 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
 
   const isDense = !!dense;
   const cfg = {
-    particleCount: Math.max(1, Math.floor((isDense ? 280000 : 200000) * nodeScaleRef.current)),
+    // High-count aesthetic for complex shapes when not dense (multi-cluster partial sphere)
+    particleCount: Math.max(200, Math.floor((isDense ? 82500 : 45000) * nodeScaleRef.current)),
     clusterCount: 9,
-    pointSizePx: isDense ? 3.2 : 7.0,
-    baseColor: isDense ? ([0.78, 0.65, 0.98] as [number, number, number]) : ([0.70, 0.62, 0.94] as [number, number, number]),
+    pointSizePx: isDense ? 1.6 : 6.0,
+    // Softer cyan/blue glow
+    baseColor: isDense ? ([0.72, 0.62, 0.94] as [number, number, number]) : ([0.45, 0.80, 1.0] as [number, number, number]),
     background: [0.04, 0.04, 0.07] as [number, number, number],
     glow: isDense ? 1.15 : 0.95,
     spokeFraction: isDense ? 0.24 : 0.12,
@@ -177,6 +179,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
     const seed = new Float32Array(N);
     const hubMaskArr = new Float32Array(N);      // 0 outside hubs, 1 inside hubs
     const hubAlphaArr = new Float32Array(N);     // per-point alpha scaler (<=1)
+    const clusterIdArr = new Int8Array(N);       // 0..3 cluster id (or nearest), -1 if none
 
     // cluster centers via Fibonacci sphere
     const CLUSTERS = Math.max(1, cfg.clusterCount | 0);
@@ -229,19 +232,20 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
     function radiusCore() { return 0.02 + 0.18 * Math.pow(Math.random(), 1.6); }
     function radiusBody() { return 0.30 + 0.60 * Math.pow(Math.random(), 0.9); }
     // Emphasize outer halo near boundary for 5x shell test
-    function radiusShell() { return 0.92 + 0.08 * Math.pow(Math.random(), 1.8); }
+    function radiusShell() { return 0.94 + 0.05 * Math.pow(Math.random(), 1.8); }
 
     // mixture weights (soft) - force only core for experiment
-    const wCore = 1.0; // only core
-    const wClusterSmall = 0.0, wClusterMid = 0.0, wClusterFull = 0.0, wShell = 0.0, wDust = 0.0;
-    const wHubs = 0.0; // disable hubs
+    // Favor a thin shell look like the reference image
+    const wCore = 0.15;
+    const wClusterSmall = 0.0, wClusterMid = 0.0, wClusterFull = 0.0, wShell = 0.85, wDust = 0.0;
+    const wHubs = 0.0; // no hubs
     const wSum = wCore + wClusterSmall + wClusterMid + wClusterFull + wShell + wDust + wHubs;
 
     function fillRange(start: number, end: number){
       for (let i = start; i < end; i++) {
         let x = 0, y = 0, z = 0;
         // a portion of points lie along great-circle arcs between cluster centers (faint spokes)
-        if (Math.random() < cfg.spokeFraction) {
+        if (Math.random() < 0.05) {
           const a = centers[(Math.random() * CLUSTERS) | 0]
           let bIdx = (Math.random() * CLUSTERS) | 0
           if (bIdx === 0 && CLUSTERS>1) bIdx = 1
@@ -254,8 +258,39 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
           y = (dir[1] + jitter*0.7) * R
           z = (dir[2] + jitter) * R
         } else {
-          // Force core
-            const d = uniformDir(); const R = radiusCore(); x = d[0] * R; y = d[1] * R; z = d[2] * R;
+          // Multi-cluster sampling: strongly favor several large hubs
+          if (Math.random() < 0.65) {
+            const idx = (Math.random() * hubCenters.length) | 0
+            const s = hubSigma[idx] * 2.4
+            const c = hubCenters[idx]
+            const gx = (Math.random()*2-1)+(Math.random()*2-1)+(Math.random()*2-1)
+            const gy = (Math.random()*2-1)+(Math.random()*2-1)+(Math.random()*2-1)
+            const gz = (Math.random()*2-1)+(Math.random()*2-1)+(Math.random()*2-1)
+            x = c[0] + s*gx; y = c[1] + s*gy; z = c[2] + s*gz
+            clusterIdArr[i] = idx as any
+          } else {
+            // Place near shell with mild jitter
+            const d = uniformDir();
+            const R = (Math.random() < wShell / (wCore + wShell)) ? radiusShell() : radiusCore();
+            x = d[0] * R; y = d[1] * R; z = d[2] * R;
+            // Assign nearest hub for cluster id
+            let best = 0; let bd = 1e9
+            for (let h=0; h<hubCenters.length; h++){
+              const dx = x - hubCenters[h][0], dy = y - hubCenters[h][1], dz = z - hubCenters[h][2]
+              const d2 = dx*dx+dy*dy+dz*dz; if (d2 < bd){ bd = d2; best = h }
+            }
+            clusterIdArr[i] = best as any
+          }
+        }
+        // Constrain to a near-spherical shell band: project to target radius with soft jitter
+        {
+          const L = Math.hypot(x,y,z) || 1e-6
+          const ux = x/L, uy = y/L, uz = z/L
+          const target = 0.88 + 0.06 * Math.random()
+          const jitter = 0.02
+          x = ux * target + (Math.random()*2-1) * jitter
+          y = uy * target + (Math.random()*2-1) * jitter
+          z = uz * target + (Math.random()*2-1) * jitter
         }
         const r0 = Math.hypot(x, y, z) || 1e-6;
         const aBite = biteAmount(x, y, z);
@@ -281,13 +316,13 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
           const comp = 1.0 - 0.18 * w; // up to 18% inward near lobes
           x *= comp; y *= comp; z *= comp;
         }
-        // Remove any residual central mega-core by redistributing inner particles into a mid band
+        // Remove any residual central core — keep a hollow center
         {
-          const cutR = fourCores ? 0.38 : 0.38; // inner radius to clear (push farther out for all modes)
+          const cutR = 0.50;
           if (r0 < cutR) {
             const dir = (r0 > 1e-6) ? [x/r0, y/r0, z/r0] : uniformDir();
-            const bandMin = 0.50;
-            const bandMax = 0.72;
+            const bandMin = 0.78;
+            const bandMax = 0.90;
             const newR = bandMin + (bandMax - bandMin) * Math.random();
             // slight tangential jitter to avoid banding
             const jx = (Math.random()*2-1) * 0.04;
@@ -299,28 +334,8 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
             hubAlphaArr[i] = 1.0;
           }
         }
-        // Push even farther with stronger jitter
-        {
-          const cutR = 0.60; // higher cutoff
-          if (r0 < cutR) {
-            const dir = (r0 > 1e-6) ? [x/r0, y/r0, z/r0] : uniformDir();
-            const bandMin = 0.70;
-            const bandMax = 0.98;
-            const newR = bandMin + (bandMax - bandMin) * Math.random();
-            const jx = (Math.random()*2-1) * 0.12;
-            const jy = (Math.random()*2-1) * 0.12;
-            const jz = (Math.random()*2-1) * 0.12;
-            x = dir[0] * newR + jx; y = dir[1] * newR + jy; z = dir[2] * newR + jz;
-            const newL = Math.hypot(x, y, z) || 1e-6;
-            if (newL > 0.98) {
-              x *= 0.98 / newL; y *= 0.98 / newL; z *= 0.98 / newL;
-            }
-            hubMaskArr[i] = 0.0;
-            hubAlphaArr[i] = 1.0;
-          }
-        }
-        // Condense overall sphere by 15% (scale by 0.85)
-        const scale = 0.85;
+        // Slightly smaller sphere to emphasize shell
+        const scale = 0.78;
         const j = 3 * i;
         pos0[j + 0] = x * scale; pos0[j + 1] = y * scale; pos0[j + 2] = z * scale;
         seed[i] = Math.random();
@@ -328,7 +343,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       }
     }
 
-    // no decorative lines; particles only
+    // Build decorative triangulation-style edges on the shell for a clean poly look
 
     const regl = createREGL({ canvas, attributes: { antialias: false, alpha: false, depth: true } });
     reglRef.current = regl;
@@ -354,8 +369,11 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
     
     // Simple edge system for sparse area fill
     const mult = Math.max(1, Math.min(3, Math.round(edgeMultiplier)));
-    const MAX_EDGES = (isDense ? 1200000 : (showEdges ? 1500000 : 1500)) * mult; // huge capacity for tons of edges
+    // Cap drastically in low-count mode even if showEdges is on
+    // High node count: keep edges bounded for performance
+    const MAX_EDGES = (isDense ? 1200000 : (showEdges ? 350000 : 180000)) * mult;
     const edgeData = new Float32Array(MAX_EDGES * 6); // 2 points * 3 coords each
+    const edgeKind = new Float32Array(MAX_EDGES);     // 1=intra-cluster, 0=inter-cluster
     let edgeCount = 0;
     // screen-space quad for outer sphere ring
     const quad = regl.buffer(new Float32Array([
@@ -558,10 +576,12 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
 
     // Edge renderer (used for dense mode and/or scaffolding)
     const edgeBuf = regl.buffer({ usage: 'dynamic', type: 'float', length: edgeData.byteLength });
+    const edgeKindBuf = regl.buffer({ usage: 'dynamic', type: 'float', length: edgeKind.byteLength });
     const drawEdges = regl({
       vert: `
       precision highp float;
       attribute vec3 a_pos;
+      attribute float a_kind;
       uniform float u_time, u_zoom, u_phase;
       uniform vec2 u_view;
       uniform mat3 u_rot;
@@ -569,6 +589,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       varying float v_a;
       varying float v_r;
       varying float v_eViewZ;
+      varying float v_kind;
       void main(){
         float cy = cos(u_time*u_rotSpeed), sy = sin(u_time*u_rotSpeed);
         mat3 ry = mat3(cy,0.0,sy, 0.0,1.0,0.0, -sy,0.0,cy);
@@ -581,32 +602,37 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
         float r = length(a_pos);
         v_r = r;
         v_eViewZ = pr.z;
-        // strong visibility baseline
-        v_a = 0.85; // baseline, scaled by uniform in fragment
+        // per-line brightness variation (light/dark)
+        float h = fract(sin(dot(a_pos, vec3(12.9898,78.233,37.719))) * 43758.5453);
+        v_a = mix(0.45, 1.0, h); // baseline, scaled by uniform in fragment
+        v_kind = a_kind;
       }`,
       frag: `
       precision highp float;
       varying float v_a;
       varying float v_r;
       varying float v_eViewZ;
+      varying float v_kind;
       uniform float u_centerCut;
       uniform float u_edgeAlpha;
-      uniform vec3  u_edgeColor;
+      uniform vec3  u_edgeColorIntra;
+      uniform vec3  u_edgeColorInter;
       uniform float u_globalBrightness;
       uniform vec2  u_frontFade;
       uniform float u_frontCut;
       uniform float u_frontRadMin;
       void main(){
-        // Hard cull only the very front OUTER shell, keep interior connections
+        // Prefer shell edges; softly suppress interior
         if (v_eViewZ > u_frontCut && v_r > u_frontRadMin) discard;
-        float suppress = smoothstep(u_centerCut - 0.06, u_centerCut + 0.03, v_r);
-        float a = v_a * suppress * u_edgeAlpha * clamp(u_globalBrightness, 0.2, 2.5); // radius-gated and user-scaled
+        float suppress = smoothstep(u_centerCut - 0.10, u_centerCut + 0.02, v_r);
+        float a = v_a * suppress * u_edgeAlpha * clamp(u_globalBrightness, 0.2, 2.5);
         // Hide edges near front of sphere
         float frontMask = 1.0 - smoothstep(u_frontFade.x, u_frontFade.y, v_eViewZ);
         a *= frontMask;
-        gl_FragColor = vec4(u_edgeColor, a);
+        vec3 col = mix(u_edgeColorInter, u_edgeColorIntra, clamp(v_kind, 0.0, 1.0));
+        gl_FragColor = vec4(col, a);
       }`,
-      attributes: { a_pos: { buffer: edgeBuf, size: 3 } },
+      attributes: { a_pos: { buffer: edgeBuf, size: 3 }, a_kind: { buffer: edgeKindBuf, size: 1 } },
       uniforms: {
         u_time: () => performance.now() / 1000,
         u_zoom: () => zoomRef.current,
@@ -617,9 +643,10 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
           return [1, 0, 0, 0, c, -s, 0, s, c];
         },
         u_rotSpeed: () => (asBackground ? Math.max(0.0, Math.min(0.05, bgRotSpeed || 0.0)) : rotSpeedRef.current),
-        u_centerCut: () => 0.45,
-        u_edgeAlpha: () => (asBackground ? edgeAlphaRef.current * 0.5 : edgeAlphaRef.current),
-        u_edgeColor: () => edgeColorRef.current,
+        u_centerCut: () => 0.82, // draw edges only very near shell
+        u_edgeAlpha: () => (asBackground ? Math.min(0.4, edgeAlphaRef.current * 0.5) : Math.min(0.7, edgeAlphaRef.current * 0.7)),
+        u_edgeColorIntra: () => [0.40, 0.80, 1.0],
+        u_edgeColorInter: () => [0.72, 0.52, 0.96],
         u_globalBrightness: () => brightnessRef.current,
         u_frontFade: () => (asBackground ? [0.10, 0.40] : [10.0, 11.0]),
         u_frontCut: () => (asBackground ? 0.06 : 99.0),
@@ -628,7 +655,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       count: () => Math.max(0, Math.floor(edgeCount * Math.max(0.0, Math.min(1.0, (asBackground ? edgeFractionRef.current * 0.3 : edgeFractionRef.current)))) * 2),
       primitive: 'lines',
       depth: { enable: false },
-      blend: { enable: true, func: { srcRGB: 'one', srcAlpha: 'one', dstRGB: 'one', dstAlpha: 'one' } }
+      blend: { enable: true, func: { srcRGB: 'src alpha', srcAlpha: 'one', dstRGB: 'one minus src alpha', dstAlpha: 'one minus src alpha' } }
     });
 
     // removed drawLines pass
@@ -761,6 +788,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
                 if (dist < 0.08) {  // slightly longer
                   edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
                   edgeData[ei * 6 + 3] = x2; edgeData[ei * 6 + 4] = y2; edgeData[ei * 6 + 5] = z2;
+                  edgeKind[ei] = (clusterIdArr[i] === clusterIdArr[j]) ? 1.0 : 0.0;
                   ei++;
                 }
               }
@@ -774,6 +802,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
               if (r2 > OUTER_RING_MIN && dist < 0.08) {  // longer
                 edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
                 edgeData[ei * 6 + 3] = x2; edgeData[ei * 6 + 4] = y2; edgeData[ei * 6 + 5] = z2;
+                edgeKind[ei] = (clusterIdArr[i] === clusterIdArr[j]) ? 1.0 : 0.0;
                 ei++;
               }
             }
@@ -791,6 +820,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
               if (dist < MAX_DIST && angular > 0.50) { // relax angular constraint heavily
                 edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
                 edgeData[ei * 6 + 0 + 3] = x2; edgeData[ei * 6 + 1 + 3] = y2; edgeData[ei * 6 + 2 + 3] = z2;
+                edgeKind[ei] = (clusterIdArr[i] === clusterIdArr[j]) ? 1.0 : 0.0;
                 ei++;
               }
             }
@@ -820,6 +850,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
             if (dist < (MAX_DIST*1.2)) {  // longer
               edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
               edgeData[ei * 6 + 3] = x2; edgeData[ei * 6 + 4] = y2; edgeData[ei * 6 + 5] = z2;
+              edgeKind[ei] = (clusterIdArr[i] === clusterIdArr[j]) ? 1.0 : 0.0;
               ei++;
             }
           }
@@ -902,6 +933,8 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
                 if (dd < LOCAL_DIST*LOCAL_DIST * 1.5) {
                   edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
                   edgeData[ei * 6 + 3] = x2; edgeData[ei * 6 + 4] = y2; edgeData[ei * 6 + 5] = z2;
+                  // cluster id of j is clusterIdArr[j]
+                  edgeKind[ei] = (clusterIdArr[i] === clusterIdArr[j]) ? 1.0 : 0.0;
                   ei++;
                 }
                 // add a second connection to create a tiny triangle mesh feel
@@ -912,6 +945,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
                 if (dd2 < (LOCAL_DIST*LOCAL_DIST)) {
                   edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
                   edgeData[ei * 6 + 3] = x3; edgeData[ei * 6 + 4] = y3; edgeData[ei * 6 + 5] = z3;
+                  edgeKind[ei] = (clusterIdArr[i] === clusterIdArr[j2]) ? 1.0 : 0.0;
                   ei++;
                 }
               }
@@ -939,6 +973,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
               if (angular > 0.92 && dist < 0.14) {
                 edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
                 edgeData[ei * 6 + 3] = x2; edgeData[ei * 6 + 4] = y2; edgeData[ei * 6 + 5] = z2;
+                edgeKind[ei] = (clusterIdArr[i] === clusterIdArr[j]) ? 1.0 : 0.0;
                 ei++;
               }
             }
@@ -947,8 +982,8 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
         
         edgeCount = ei;
         if (edgeCount > 0) {
-          // Thin edges to ~30% to reduce the red fill (cut ~70%)
-          const KEEP_RATIO = 0.30;
+          // Aggressive thinning in low-count mode; softer in dense mode
+          const KEEP_RATIO = isDense ? 0.30 : 0.55; // keep more due to higher node count
           if (edgeCount > 0) {
             let write = 0;
             for (let t = 0; t < edgeCount; t++) {
@@ -965,11 +1000,11 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
             }
             edgeCount = write;
           }
-          // Apply another 70% reduction
+          // Second pass reduction
           if (edgeCount > 0) {
             let write2 = 0;
             for (let t = 0; t < edgeCount; t++) {
-              if (Math.random() <= 0.30) {
+              if (Math.random() <= (isDense ? 0.30 : 0.65)) {
                 const r = write2 * 6, s = t * 6;
                 edgeData[r + 0] = edgeData[s + 0];
                 edgeData[r + 1] = edgeData[s + 1];
@@ -982,7 +1017,31 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
             }
             edgeCount = write2;
           }
-          try { if (alive) edgeBuf.subdata(edgeData.subarray(0, edgeCount * 6)) } catch {}
+          // Guarantee at least one connection per node (nearest-neighbor) for coherence
+          if (edgeCount < MAX_EDGES) {
+            const MNN = M;
+            const deg: Uint16Array = new Uint16Array(MNN);
+            for (let t = 0; t < edgeCount; t++) {
+              const s = t * 6;
+              const i = Math.max(0, Math.min(MNN-1, Math.floor(s/6) >= 0 ? (():number=>{ const ax=edgeData[s+0], ay=edgeData[s+1], az=edgeData[s+2]; /* find original index by comparing to pos0 (cheap hash) */ let best=0,bd=1e9; for(let q=0;q<MNN;q++){ const dx=pos0[q*3]-ax, dy=pos0[q*3+1]-ay, dz=pos0[q*3+2]-az; const d=dx*dx+dy*dy+dz*dz; if(d<bd){bd=d; best=q} } return best })() : 0));
+              const j = (():number=>{ const bx=edgeData[s+3], by=edgeData[s+4], bz=edgeData[s+5]; let best=0,bd=1e9; for(let q=0;q<MNN;q++){ const dx=pos0[q*3]-bx, dy=pos0[q*3+1]-by, dz=pos0[q*3+2]-bz; const d=dx*dx+dy*dy+dz*dz; if(d<bd){bd=d; best=q} } return best })();
+              deg[i]++; deg[j]++;
+            }
+            for (let i = 0; i < MNN && edgeCount < MAX_EDGES; i++) {
+              if (deg[i] > 0) continue;
+              let best = -1; let bd = 1e9;
+              const ix = pos0[i*3], iy = pos0[i*3+1], iz = pos0[i*3+2];
+              for (let j = 0; j < MNN; j++) { if (j===i) continue; const dx=pos0[j*3]-ix, dy=pos0[j*3+1]-iy, dz=pos0[j*3+2]-iz; const d = dx*dx+dy*dy+dz*dz; if (d < bd) { bd = d; best = j } }
+              if (best >= 0) {
+                const r = edgeCount * 6;
+                edgeData[r+0] = ix; edgeData[r+1] = iy; edgeData[r+2] = iz;
+                edgeData[r+3] = pos0[best*3]; edgeData[r+4] = pos0[best*3+1]; edgeData[r+5] = pos0[best*3+2];
+                edgeCount++;
+                deg[i]++; deg[best]++;
+              }
+            }
+          }
+          try { if (alive) edgeBuf.subdata(edgeData.subarray(0, Math.min(edgeCount, MAX_EDGES) * 6)) } catch {}
           try { if (!(window as any).__EDGE_LOGGED__) { (window as any).__EDGE_LOGGED__ = true; } } catch {}
         }
       }
