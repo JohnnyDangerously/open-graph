@@ -87,10 +87,14 @@ export default function CommandBar(props: CommandBarProps) {
     setActiveSuggestion(0);
   }, [expression, selectionStart, history]);
 
+  // Stabilize onPreview to avoid effect churn if parent passes a new function each render
+  const onPreviewRef = useRef<typeof onPreview>();
+  useEffect(() => { onPreviewRef.current = onPreview; }, [onPreview]);
+
   useEffect(() => {
     if (!value.trim()) {
       setEvaluation(null);
-      onPreview?.(null);
+      onPreviewRef.current?.(null);
       return;
     }
     setEvaluating(true);
@@ -99,13 +103,13 @@ export default function CommandBar(props: CommandBarProps) {
       try {
         const result = await evaluate(value, { history, signal: controller.signal });
         setEvaluation(result);
-        onPreview?.(result);
+        onPreviewRef.current?.(result);
         setEvaluating(false);
       } catch (error: any) {
         if (error?.name === "AbortError") return;
         console.warn("evaluate failed", error);
         setEvaluation(null);
-        onPreview?.(null);
+        onPreviewRef.current?.(null);
         setEvaluating(false);
       }
     }, DEBOUNCE_MS);
@@ -114,7 +118,7 @@ export default function CommandBar(props: CommandBarProps) {
       window.clearTimeout(handle);
       setEvaluating(false);
     };
-  }, [value, history, onPreview]);
+  }, [value, history]);
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const next = e.target.value;
@@ -225,7 +229,7 @@ export default function CommandBar(props: CommandBarProps) {
     setTimeout(() => {
       setValue("");
       setEvaluation(null);
-      onPreview?.(null);
+      onPreviewRef.current?.(null);
       setSelectionStart(0);
       setSelectionEnd(0);
       setSuggestions([]);

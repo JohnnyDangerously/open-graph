@@ -44,6 +44,7 @@ export default function App(){
   const [concentric, setConcentric] = useState(false);
   const [showContacts, setShowContacts] = useState(false);
   const [showNLQ, setShowNLQ] = useState(false);
+  const [showFeaturesMenu, setShowFeaturesMenu] = useState(false);
   // demo state removed
   const [spawnDir, setSpawnDir] = useState(0) // 0:N,1:E,2:S,3:W
   const [selectedRegion, setSelectedRegion] = useState<null | 'left' | 'right' | 'overlap'>(null)
@@ -830,8 +831,26 @@ export default function App(){
       {/* HUD is now replaced by inline controls within CommandBar */}
       {/* Top-left nav for panels */}
       <div style={{ position:'absolute', top:12, left:12, zIndex:16, display:'flex', gap:8 }}>
-        <button onClick={()=> setShowContacts(s=>!s)} style={{ padding:'8px 10px', borderRadius:10, background: showContacts? '#4f7cff' : 'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.15)' }}>Company Contacts</button>
-        <button onClick={()=> setShowNLQ(s=>!s)} style={{ padding:'8px 10px', borderRadius:10, background: showNLQ? '#4f7cff' : 'rgba(255,255,255,0.08)', color:'#fff', border:'1px solid rgba(255,255,255,0.15)' }}>Ask (NLQ)</button>
+        <div style={{ position:'relative' }}>
+          <button
+            onClick={()=> setShowFeaturesMenu(v=>!v)}
+            style={{ padding:'8px 10px', borderRadius:10, background: 'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)' }}
+          >
+            Show features ▾
+          </button>
+          {showFeaturesMenu && (
+            <div style={{ position:'absolute', top:'110%', left:0, display:'grid', gap:6, padding:8, background:'rgba(0,0,0,0.8)', border:'1px solid rgba(255,255,255,0.18)', borderRadius:10, minWidth:160 }}>
+              <button
+                onClick={()=>{ setShowNLQ(true); setShowContacts(false); setShowFeaturesMenu(false) }}
+                style={{ textAlign:'left', padding:'8px 10px', borderRadius:8, background:'rgba(255,255,255,0.06)', color:'#fff', border:'1px solid rgba(255,255,255,0.16)', cursor:'pointer' }}
+              >Ask (NLQ)</button>
+              <button
+                onClick={()=>{ setShowContacts(true); setShowNLQ(false); setShowFeaturesMenu(false) }}
+                style={{ textAlign:'left', padding:'8px 10px', borderRadius:8, background:'rgba(255,255,255,0.06)', color:'#fff', border:'1px solid rgba(255,255,255,0.16)', cursor:'pointer' }}
+              >Company Contacts</button>
+            </div>
+          )}
+        </div>
       </div>
       {showContacts && (
         <CompanyContacts />

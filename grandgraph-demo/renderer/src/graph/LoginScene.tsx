@@ -669,23 +669,26 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
     // Company tag animation system (disabled in background mode)
     let tagRafId: number | null = null;
     if (!asBackground) {
-    const updateCompanyTags = () => {
-      const now = performance.now();
-      setCompanyTags(prev => {
-        const active = prev.filter(tag => now - tag.startTime < 5000);
+      const updateCompanyTags = () => {
+        const now = performance.now();
+        setCompanyTags(prev => {
+          const active = prev.filter(tag => now - tag.startTime < 5000);
+          let next = active;
           if (active.length < 5 && Math.random() < 0.02) {
-          const company = companies[Math.floor(Math.random() * companies.length)];
-          const canvas = canvasRef.current;
-          if (canvas) {
+            const company = companies[Math.floor(Math.random() * companies.length)];
+            const canvas = canvasRef.current;
+            if (canvas) {
               const newTag = { id: Math.random(), company, x: 0.2 + Math.random() * 0.6, y: 0.2 + Math.random() * 0.6, startTime: now, angle: Math.random() * Math.PI * 2 };
-            return [...active, newTag];
+              next = [...active, newTag];
+            }
           }
-        }
-        return active;
-      });
-      tagRafId = requestAnimationFrame(updateCompanyTags);
-    };
-    updateCompanyTags();
+          // Avoid unnecessary state updates if nothing changed
+          if (next.length === prev.length) return prev;
+          return next;
+        });
+        tagRafId = requestAnimationFrame(updateCompanyTags);
+      };
+      updateCompanyTags();
     }
 
     // Start non-blocking data generation and update buffers incrementally
