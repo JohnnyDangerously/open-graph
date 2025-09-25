@@ -26,6 +26,9 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
   const doneRef = useRef(false);
   const filledRef = useRef(0); // number of points currently generated
   const [companyTags, setCompanyTags] = useState<Array<{id: number, company: string, x: number, y: number, startTime: number, angle: number}>>([]);
+  // single hopping sparkle state
+  const [sparkles, setSparkles] = useState<Array<{id: number, edgeIndex: number, progress: number, startTime: number, color: [number, number, number]}>>([]);
+  const [flowParticles, setFlowParticles] = useState<Array<never>>([] as any);
   const paletteRef = useRef<number>(0);
   const brightnessRef = useRef<number>(brightness);
   const nodeScaleRef = useRef<number>(Math.max(0.25, Math.min(4.0, nodeScale)));
@@ -44,15 +47,15 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
 
   const isDense = !!dense;
   const cfg = {
-    // High-count aesthetic for complex shapes when not dense (multi-cluster partial sphere)
-    particleCount: Math.max(200, Math.floor((isDense ? 82500 : 45000) * nodeScaleRef.current)),
-    clusterCount: 9,
-    pointSizePx: isDense ? 1.6 : 6.0,
+    // Reduced particle count for better performance while maintaining visual appeal
+    particleCount: Math.max(200, Math.floor((isDense ? 35000 : 18000) * nodeScaleRef.current)),
+    clusterCount: 6, // reduced from 9
+    pointSizePx: isDense ? 1.8 : 7.0, // slightly larger points to compensate for fewer particles
     // Softer cyan/blue glow
     baseColor: isDense ? ([0.72, 0.62, 0.94] as [number, number, number]) : ([0.45, 0.80, 1.0] as [number, number, number]),
     background: [0.04, 0.04, 0.07] as [number, number, number],
-    glow: isDense ? 1.15 : 0.95,
-    spokeFraction: isDense ? 0.24 : 0.12,
+    glow: isDense ? 1.25 : 1.05, // slightly higher glow to compensate for fewer particles
+    spokeFraction: isDense ? 0.20 : 0.10,
     ...(config || {})
   };
   // Four-core hubs: two large, one medium, one small — clearly separated in space
@@ -147,6 +150,9 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
   // Parallax shift from foreground camera (in screen pixels)
   const pxRef = useRef(0)
   const pyRef = useRef(0)
+  // Store edge data for sparkle effects
+  const edgeDataRef = useRef<Float32Array | null>(null)
+  const edgeCountRef = useRef(0)
  
   // No separate flat layer anymore; keep single starfield and zoom in
 
@@ -271,7 +277,9 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
           } else {
             // Place near shell with mild jitter
             const d = uniformDir();
-            const R = (Math.random() < wShell / (wCore + wShell)) ? radiusShell() : radiusCore();
+            let R = (Math.random() < wShell / (wCore + wShell)) ? radiusShell() : radiusCore();
+            // Pull dense outer clumps slightly inward
+            if (R > 0.90) R *= 0.92;
             x = d[0] * R; y = d[1] * R; z = d[2] * R;
             // Assign nearest hub for cluster id
             let best = 0; let bd = 1e9
@@ -345,7 +353,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
 
     // Build decorative triangulation-style edges on the shell for a clean poly look
 
-    const regl = createREGL({ canvas, attributes: { antialias: false, alpha: false, depth: true } });
+    const regl = createREGL({ canvas, attributes: { antialias: false, alpha: false, depth: false, stencil: false, preserveDrawingBuffer: false } });
     reglRef.current = regl;
 
     const resize = () => {
@@ -367,14 +375,71 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
     const hubMaskBuf = regl.buffer({ usage: 'dynamic', type: 'float', length: hubMaskArr.byteLength });
     const hubAlphaBuf = regl.buffer({ usage: 'dynamic', type: 'float', length: hubAlphaArr.byteLength });
     
-    // Simple edge system for sparse area fill
-    const mult = Math.max(1, Math.min(3, Math.round(edgeMultiplier)));
-    // Cap drastically in low-count mode even if showEdges is on
-    // High node count: keep edges bounded for performance
-    const MAX_EDGES = (isDense ? 1200000 : (showEdges ? 350000 : 180000)) * mult;
+    // Curved edge system for better visual appeal  
+    const mult = Math.max(1, Math.min(2, Math.round(edgeMultiplier)));
+    // Edge count with curve segments (each edge becomes 3 segments for curves)
+    const BASE_EDGES = (isDense ? 150000 : (showEdges ? 40000 : 20000)) * mult;
+    const MAX_EDGES = BASE_EDGES * 3; // multiply by 3 for curve segments
     const edgeData = new Float32Array(MAX_EDGES * 6); // 2 points * 3 coords each
     const edgeKind = new Float32Array(MAX_EDGES);     // 1=intra-cluster, 0=inter-cluster
     let edgeCount = 0;
+    
+    // Helper function to create curved edge between two points
+    function addCurvedEdge(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number, kind: number): boolean {
+      if (edgeCount >= MAX_EDGES - 3) return false; // need space for 3 segments
+      
+      // Calculate control point for curve - offset perpendicular to the line
+      const mx = (x1 + x2) * 0.5;
+      const my = (y1 + y2) * 0.5;
+      const mz = (z1 + z2) * 0.5;
+      
+      // Create a control point that bends outward from the sphere center
+      const centerDist = Math.hypot(mx, my, mz) || 1e-6;
+      const bendAmount = 0.12; // how much to bend the curve
+      // Bend inward (toward center) so edges do not poke outside silhouette
+      let cx = mx - (mx / centerDist) * bendAmount;
+      let cy = my - (my / centerDist) * bendAmount;
+      let cz = mz - (mz / centerDist) * bendAmount;
+      // Clamp control point to rim to guarantee segments stay inside the sphere
+      const RCLAMP = 0.85 * 0.985; // match edge RMAX with small margin
+      const cL = Math.hypot(cx, cy, cz) || 1e-6;
+      if (cL > RCLAMP) { const s = RCLAMP / cL; cx *= s; cy *= s; cz *= s; }
+      
+      // Create 3 line segments for the curve
+      // Segment 1: start to quarter point
+      let q1x = x1 * 0.75 + cx * 0.25;
+      let q1y = y1 * 0.75 + cy * 0.25;
+      let q1z = z1 * 0.75 + cz * 0.25;
+      
+      // Segment 2: quarter to three-quarter point  
+      let q3x = x2 * 0.25 + cx * 0.75;
+      let q3y = y2 * 0.25 + cy * 0.75;
+      let q3z = z2 * 0.25 + cz * 0.75;
+      // Clamp intermediate points to keep them within rim
+      let qL = Math.hypot(q1x, q1y, q1z) || 1e-6; if (qL > RCLAMP) { const s = RCLAMP / qL; q1x *= s; q1y *= s; q1z *= s; }
+      qL = Math.hypot(q3x, q3y, q3z) || 1e-6; if (qL > RCLAMP) { const s = RCLAMP / qL; q3x *= s; q3y *= s; q3z *= s; }
+      
+      // Add the three segments
+      const ei = edgeCount;
+      
+      // Segment 1: start to quarter
+      edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
+      edgeData[ei * 6 + 3] = q1x; edgeData[ei * 6 + 4] = q1y; edgeData[ei * 6 + 5] = q1z;
+      edgeKind[ei] = kind;
+      
+      // Segment 2: quarter to three-quarter
+      edgeData[(ei + 1) * 6 + 0] = q1x; edgeData[(ei + 1) * 6 + 1] = q1y; edgeData[(ei + 1) * 6 + 2] = q1z;
+      edgeData[(ei + 1) * 6 + 3] = q3x; edgeData[(ei + 1) * 6 + 4] = q3y; edgeData[(ei + 1) * 6 + 5] = q3z;
+      edgeKind[ei + 1] = kind;
+      
+      // Segment 3: three-quarter to end
+      edgeData[(ei + 2) * 6 + 0] = q3x; edgeData[(ei + 2) * 6 + 1] = q3y; edgeData[(ei + 2) * 6 + 2] = q3z;
+      edgeData[(ei + 2) * 6 + 3] = x2; edgeData[(ei + 2) * 6 + 4] = y2; edgeData[(ei + 2) * 6 + 5] = z2;
+      edgeKind[ei + 2] = kind;
+      
+      edgeCount += 3;
+      return true;
+    }
     // screen-space quad for outer sphere ring
     const quad = regl.buffer(new Float32Array([
       -1, -1,
@@ -624,8 +689,9 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       void main(){
         // Prefer shell edges; softly suppress interior
         if (v_eViewZ > u_frontCut && v_r > u_frontRadMin) discard;
-        float suppress = smoothstep(u_centerCut - 0.10, u_centerCut + 0.02, v_r);
-        float a = v_a * suppress * u_edgeAlpha * clamp(u_globalBrightness, 0.2, 2.5);
+        // Keep some visibility toward center: minimum alpha via mix
+        float suppress = smoothstep(u_centerCut - 0.20, u_centerCut + 0.05, v_r);
+        float a = v_a * mix(0.45, 1.0, suppress) * u_edgeAlpha * clamp(u_globalBrightness, 0.2, 2.5);
         // Hide edges near front of sphere
         float frontMask = 1.0 - smoothstep(u_frontFade.x, u_frontFade.y, v_eViewZ);
         a *= frontMask;
@@ -643,10 +709,10 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
           return [1, 0, 0, 0, c, -s, 0, s, c];
         },
         u_rotSpeed: () => (asBackground ? Math.max(0.0, Math.min(0.05, bgRotSpeed || 0.0)) : rotSpeedRef.current),
-        u_centerCut: () => 0.82, // draw edges only very near shell
-        u_edgeAlpha: () => (asBackground ? Math.min(0.4, edgeAlphaRef.current * 0.5) : Math.min(0.7, edgeAlphaRef.current * 0.7)),
-        u_edgeColorIntra: () => [0.40, 0.80, 1.0],
-        u_edgeColorInter: () => [0.72, 0.52, 0.96],
+        u_centerCut: () => 0.65, // allow more interior edges
+        u_edgeAlpha: () => (asBackground ? Math.min(0.4, edgeAlphaRef.current * 0.5) : Math.min(0.75, edgeAlphaRef.current * 0.6)), // 50% less opaque
+        u_edgeColorIntra: () => [0.55, 0.85, 1.0], // brighter blue
+        u_edgeColorInter: () => [0.85, 0.65, 1.0], // brighter purple
         u_globalBrightness: () => brightnessRef.current,
         u_frontFade: () => (asBackground ? [0.10, 0.40] : [10.0, 11.0]),
         u_frontCut: () => (asBackground ? 0.06 : 99.0),
@@ -658,7 +724,226 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       blend: { enable: true, func: { srcRGB: 'src alpha', srcAlpha: 'one', dstRGB: 'one minus src alpha', dstAlpha: 'one minus src alpha' } }
     });
 
-    // removed drawLines pass
+    // Sparkle and flow particle rendering system
+    const drawSparkles = () => {
+      if (!edgeDataRef.current || (sparkles.length === 0 && flowParticles.length === 0)) return;
+      
+      // Create positions for both sparkles and flow particles
+      const sparklePositions: number[] = [];
+      const sparkleColors: number[] = [];
+      const flowPositions: number[] = [];
+      const flowColors: number[] = [];
+      
+      // Process sparkles (bright, pulsing effects)
+      sparkles.forEach(sparkle => {
+        if (sparkle.edgeIndex >= edgeCountRef.current) return;
+        
+        const edgeStart = sparkle.edgeIndex * 6;
+        const x1 = edgeDataRef.current![edgeStart + 0];
+        const y1 = edgeDataRef.current![edgeStart + 1];
+        const z1 = edgeDataRef.current![edgeStart + 2];
+        const x2 = edgeDataRef.current![edgeStart + 3];
+        const y2 = edgeDataRef.current![edgeStart + 4];
+        const z2 = edgeDataRef.current![edgeStart + 5];
+        
+        // Interpolate position along edge
+        const t = sparkle.progress;
+        const x = x1 + (x2 - x1) * t;
+        const y = y1 + (y2 - y1) * t;
+        const z = z1 + (z2 - z1) * t;
+        
+        sparklePositions.push(x, y, z);
+        sparkleColors.push(sparkle.color[0], sparkle.color[1], sparkle.color[2]);
+      });
+      
+      // Process flow particles (smooth, continuous movement)
+      flowParticles.forEach(particle => {
+        if (particle.edgeIndex >= edgeCountRef.current) return;
+        
+        const edgeStart = particle.edgeIndex * 6;
+        const x1 = edgeDataRef.current![edgeStart + 0];
+        const y1 = edgeDataRef.current![edgeStart + 1];
+        const z1 = edgeDataRef.current![edgeStart + 2];
+        const x2 = edgeDataRef.current![edgeStart + 3];
+        const y2 = edgeDataRef.current![edgeStart + 4];
+        const z2 = edgeDataRef.current![edgeStart + 5];
+        
+        // Smooth interpolation with easing
+        const t = particle.progress;
+        const easedT = t * t * (3 - 2 * t); // smooth step easing
+        const x = x1 + (x2 - x1) * easedT;
+        const y = y1 + (y2 - y1) * easedT;
+        const z = z1 + (z2 - z1) * easedT;
+        
+        flowPositions.push(x, y, z);
+        flowColors.push(particle.color[0], particle.color[1], particle.color[2]);
+      });
+      
+      // Render sparkles if any exist
+      if (sparklePositions.length > 0) {
+        const sparklePosBuf = regl.buffer({
+          usage: 'dynamic',
+          type: 'float',
+          data: sparklePositions
+        });
+        
+        const sparkleColBuf = regl.buffer({
+          usage: 'dynamic',
+          type: 'float', 
+          data: sparkleColors
+        });
+        
+        // Render sparkles as bright pulsing points
+        const drawSparklePoints = regl({
+        vert: `
+        precision highp float;
+        attribute vec3 a_pos;
+        attribute vec3 a_color;
+        uniform float u_time, u_zoom;
+        uniform vec2 u_view;
+        uniform mat3 u_rot;
+        uniform float u_rotSpeed;
+        varying vec3 v_color;
+        varying float v_alpha;
+        
+        void main() {
+          float cy = cos(u_time*u_rotSpeed), sy = sin(u_time*u_rotSpeed);
+          mat3 ry = mat3(cy,0.0,sy, 0.0,1.0,0.0, -sy,0.0,cy);
+          vec3 pr = u_rot * (ry * a_pos);
+          float f = 1.0 / (1.0 + pr.z * 0.8);
+          vec2 screen = pr.xy * (u_zoom * f);
+          vec2 clip = screen / (0.5 * u_view);
+          gl_Position = vec4(clip, 0.0, 1.0);
+          gl_PointSize = 8.0 * f; // larger sparkly points
+          v_color = a_color;
+          v_alpha = 1.0;
+        }`,
+        frag: `
+        precision highp float;
+        varying vec3 v_color;
+        varying float v_alpha;
+        uniform float u_time;
+        
+        void main() {
+          vec2 p = gl_PointCoord * 2.0 - 1.0;
+          float d = dot(p, p);
+          if (d > 1.0) discard;
+          
+          // Sparkly effect with pulsing
+          float pulse = 0.7 + 0.3 * sin(u_time * 8.0);
+          float sparkle = exp(-3.0 * d) * pulse;
+          
+          gl_FragColor = vec4(v_color * 2.0, sparkle * v_alpha);
+        }`,
+        attributes: {
+          a_pos: { buffer: sparklePosBuf, size: 3 },
+          a_color: { buffer: sparkleColBuf, size: 3 }
+        },
+        uniforms: {
+          u_time: () => performance.now() / 1000,
+          u_zoom: () => zoomRef.current,
+          u_view: ({ viewportWidth, viewportHeight }: any) => [viewportWidth, viewportHeight],
+          u_rot: () => {
+            const c = Math.cos(tiltRef.current), s = Math.sin(tiltRef.current);
+            return [1, 0, 0, 0, c, -s, 0, s, c];
+          },
+          u_rotSpeed: () => rotSpeedRef.current
+        },
+        count: sparklePositions.length / 3,
+        primitive: 'points',
+        depth: { enable: false },
+        blend: { enable: true, func: { srcRGB: 'one', srcAlpha: 'one', dstRGB: 'one', dstAlpha: 'one' } }
+      });
+      
+      drawSparklePoints();
+      
+      // Clean up temporary buffers
+      sparklePosBuf.destroy();
+      sparkleColBuf.destroy();
+      }
+      
+      // Render flow particles if any exist
+      if (flowPositions.length > 0) {
+        const flowPosBuf = regl.buffer({
+          usage: 'dynamic',
+          type: 'float',
+          data: flowPositions
+        });
+        
+        const flowColBuf = regl.buffer({
+          usage: 'dynamic',
+          type: 'float', 
+          data: flowColors
+        });
+        
+        // Render flow particles as smooth moving points
+        const drawFlowPoints = regl({
+          vert: `
+          precision highp float;
+          attribute vec3 a_pos;
+          attribute vec3 a_color;
+          uniform float u_time, u_zoom;
+          uniform vec2 u_view;
+          uniform mat3 u_rot;
+          uniform float u_rotSpeed;
+          varying vec3 v_color;
+          varying float v_alpha;
+          
+          void main() {
+            float cy = cos(u_time*u_rotSpeed), sy = sin(u_time*u_rotSpeed);
+            mat3 ry = mat3(cy,0.0,sy, 0.0,1.0,0.0, -sy,0.0,cy);
+            vec3 pr = u_rot * (ry * a_pos);
+            float f = 1.0 / (1.0 + pr.z * 0.8);
+            vec2 screen = pr.xy * (u_zoom * f);
+            vec2 clip = screen / (0.5 * u_view);
+            gl_Position = vec4(clip, 0.0, 1.0);
+            gl_PointSize = 5.0 * f; // smaller, smoother flow particles
+            v_color = a_color;
+            v_alpha = 0.8; // more subtle than sparkles
+          }`,
+          frag: `
+          precision highp float;
+          varying vec3 v_color;
+          varying float v_alpha;
+          uniform float u_time;
+          
+          void main() {
+            vec2 p = gl_PointCoord * 2.0 - 1.0;
+            float d = dot(p, p);
+            if (d > 1.0) discard;
+            
+            // Smooth flowing effect without pulsing
+            float glow = exp(-2.5 * d);
+            
+            gl_FragColor = vec4(v_color * 1.2, glow * v_alpha);
+          }`,
+          attributes: {
+            a_pos: { buffer: flowPosBuf, size: 3 },
+            a_color: { buffer: flowColBuf, size: 3 }
+          },
+          uniforms: {
+            u_time: () => performance.now() / 1000,
+            u_zoom: () => zoomRef.current,
+            u_view: ({ viewportWidth, viewportHeight }: any) => [viewportWidth, viewportHeight],
+            u_rot: () => {
+              const c = Math.cos(tiltRef.current), s = Math.sin(tiltRef.current);
+              return [1, 0, 0, 0, c, -s, 0, s, c];
+            },
+            u_rotSpeed: () => rotSpeedRef.current
+          },
+          count: flowPositions.length / 3,
+          primitive: 'points',
+          depth: { enable: false },
+          blend: { enable: true, func: { srcRGB: 'src alpha', srcAlpha: 'one', dstRGB: 'one minus src alpha', dstAlpha: 'one minus src alpha' } }
+        });
+        
+        drawFlowPoints();
+        
+        // Clean up temporary buffers
+        flowPosBuf.destroy();
+        flowColBuf.destroy();
+      }
+    };
 
     const loop = () => {
       if (!alive || !reglRef.current) { rafRef.current = null; return }
@@ -667,6 +952,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       try { drawOuter(); } catch {}
       try { if (edgeCount > 0 && (isDense || showEdges || asBackground)) drawEdges(); } catch {}
       try { draw(); } catch {}
+      try { if (!asBackground) drawSparkles(); } catch {}
       // If background is paused, draw once and stop scheduling frames
       if (asBackground && bgPaused) { rafRef.current = null; return }
       rafRef.current = requestAnimationFrame(loop);
@@ -694,6 +980,8 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
 
     // Company tag animation system (disabled in background mode)
     let tagRafId: number | null = null;
+    let sparkleRafId: number | null = null;
+    let flowRafId: number | null = null;
     if (!asBackground) {
     const updateCompanyTags = () => {
       const now = performance.now();
@@ -704,6 +992,32 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
           const canvas = canvasRef.current;
           if (canvas) {
               const newTag = { id: Math.random(), company, x: 0.2 + Math.random() * 0.6, y: 0.2 + Math.random() * 0.6, startTime: now, angle: Math.random() * Math.PI * 2 };
+            
+            // Trigger sparkles when a new company tag appears
+            if (edgeCountRef.current > 0) {
+              const numSparkles = 2 + Math.floor(Math.random() * 3); // 2-4 sparkles per tag
+              for (let i = 0; i < numSparkles; i++) {
+                setTimeout(() => {
+                  const edgeIndex = Math.floor(Math.random() * edgeCountRef.current);
+                  const colors: Array<[number, number, number]> = [
+                    [1.0, 0.95, 0.4], // golden yellow
+                    [0.4, 0.95, 1.0], // bright cyan
+                    [1.0, 0.4, 0.95], // bright magenta
+                    [0.4, 1.0, 0.6], // bright green
+                    [1.0, 0.7, 0.4], // orange
+                  ];
+                  const color = colors[Math.floor(Math.random() * colors.length)];
+                  setSparkles(prevSparkles => [...prevSparkles, {
+                    id: Math.random(),
+                    edgeIndex,
+                    progress: 0,
+                    startTime: now + i * 200, // stagger sparkles
+                    color
+                  }]);
+                }, i * 100); // stagger creation timing
+              }
+            }
+            
             return [...active, newTag];
           }
         }
@@ -712,10 +1026,36 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       tagRafId = requestAnimationFrame(updateCompanyTags);
     };
     updateCompanyTags();
+    
+    // Sparkle effect management - maintain a single hopping sparkle
+    const updateSparkles = () => {
+      const now = performance.now();
+      setSparkles(prev => {
+        let list = prev;
+        // Ensure exactly one sparkle exists
+        if (list.length === 0 && edgeCountRef.current > 0) {
+          const edgeIndex = Math.floor(Math.random() * edgeCountRef.current);
+          list = [{ id: Math.random(), edgeIndex, progress: 0, startTime: now, color: [1.0, 0.9, 0.4] }];
+        }
+        if (list.length === 0) return list;
+        const s = list[0];
+        const progress = (now - s.startTime) / 1400; // 1.4s per hop
+        if (progress >= 1.0) {
+          // hop to a new random edge
+          const nextEdge = Math.floor(Math.random() * Math.max(1, edgeCountRef.current));
+          return [{ id: Math.random(), edgeIndex: nextEdge, progress: 0, startTime: now, color: s.color }];
+        }
+        return [{ ...s, progress: Math.min(1.0, progress) }];
+      });
+      sparkleRafId = requestAnimationFrame(updateSparkles);
+    };
+    updateSparkles();
+    
+    // disable flow system (single sparkle only)
     }
 
     // Start non-blocking data generation and update buffers incrementally
-    const CHUNK = 20000;
+    const CHUNK = 8000; // smaller chunks for less blocking
     const scheduler = (cb: any) => {
       const ric: any = (window as any).requestIdleCallback;
       if (ric) ric(cb, { timeout: 16 }); else setTimeout(cb, 0);
@@ -734,10 +1074,10 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       
       // Generate edges immediately at startup (no waiting for chunks)
       if ((edgeCount === 0 || end === N) && end >= Math.min(N, 10000)) {  // build once early, rebuild at completion
-        // Parameters depend on dense vs default or explicit showEdges toggle
-        const mult = Math.max(1, Math.min(3, Math.round(edgeMultiplier)));
-        const SAMPLE_STEP = isDense ? Math.max(16, 50 / mult) : (showEdges ? Math.max(12, 40 / mult) : 700);
-        const MAX_DIST = isDense ? 0.18 : (showEdges ? 0.20 : 0.14); // allow longer edges in showEdges mode
+        // Simplified parameters for better performance
+        const mult = Math.max(1, Math.min(2, Math.round(edgeMultiplier))); // reduced from 3 to 2
+        const SAMPLE_STEP = isDense ? Math.max(25, 80 / mult) : (showEdges ? Math.max(20, 60 / mult) : 1000); // increased steps for less sampling
+        const MAX_DIST = isDense ? 0.15 : (showEdges ? 0.16 : 0.12); // reduced max distances
         let ei = 0;
         
         // Use only the currently generated points for edge creation
@@ -771,9 +1111,9 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
             const dist = Math.sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1) + (z2-z1)*(z2-z1));
               if (angular > 0.80 && r2 >= r1 && dist < 0.24) {  // relax thresholds
                 if (Math.random() < 0.95) {
-                  edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
-                  edgeData[ei * 6 + 3] = x2; edgeData[ei * 6 + 4] = y2; edgeData[ei * 6 + 5] = z2;
-                  ei++;
+                  if (addCurvedEdge(x1, y1, z1, x2, y2, z2, (clusterIdArr[i] === clusterIdArr[j]) ? 1.0 : 0.0)) {
+                    ei = edgeCount; // update ei to current edge count
+                  }
                 }
               }
             }
@@ -799,11 +1139,11 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
               const x2 = pos0[j * 3], y2 = pos0[j * 3 + 1], z2 = pos0[j * 3 + 2];
               const r2 = Math.hypot(x2, y2, z2) || 1e-6;
               const dist = Math.sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1) + (z2-z1)*(z2-z1));
-              if (r2 > OUTER_RING_MIN && dist < 0.08) {  // longer
-                edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
-                edgeData[ei * 6 + 3] = x2; edgeData[ei * 6 + 4] = y2; edgeData[ei * 6 + 5] = z2;
-                edgeKind[ei] = (clusterIdArr[i] === clusterIdArr[j]) ? 1.0 : 0.0;
-                ei++;
+              // Reduce outer-ring connections near silhouette to avoid sticking out
+              if (r2 > OUTER_RING_MIN && dist < 0.06) {
+                if (addCurvedEdge(x1, y1, z1, x2, y2, z2, (clusterIdArr[i] === clusterIdArr[j]) ? 1.0 : 0.0)) {
+                  ei = edgeCount;
+                }
               }
             }
           } else {
@@ -818,10 +1158,9 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
               const angular = ux1 * ux2 + uy1 * uy2 + uz1 * uz2;
               const dist = Math.sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1) + (z2-z1)*(z2-z1));
               if (dist < MAX_DIST && angular > 0.50) { // relax angular constraint heavily
-                edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
-                edgeData[ei * 6 + 0 + 3] = x2; edgeData[ei * 6 + 1 + 3] = y2; edgeData[ei * 6 + 2 + 3] = z2;
-                edgeKind[ei] = (clusterIdArr[i] === clusterIdArr[j]) ? 1.0 : 0.0;
-                ei++;
+                if (addCurvedEdge(x1, y1, z1, x2, y2, z2, (clusterIdArr[i] === clusterIdArr[j]) ? 1.0 : 0.0)) {
+                  ei = edgeCount; // update ei to current edge count
+                }
               }
             }
             // Guarantee baseline density: connect to a few immediate neighbors in index order
@@ -882,18 +1221,18 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
           }
         }
 
-        // Micro-edge pass: many short edges around the outer band for visual richness
+        // Simplified micro-edge pass: fewer but more targeted short edges for performance
         if (ei < MAX_EDGES) {
-          const target = Math.min(MAX_EDGES, ei + 240000 * mult);
-          const MICRO_STEP = 40;
+          const target = Math.min(MAX_EDGES, ei + 80000 * mult); // greatly reduced from 288000
+          const MICRO_STEP = 50; // increased step for less sampling
           for (let i = 0; i < M && ei < target; i += MICRO_STEP) {
             const x1 = pos0[i * 3], y1 = pos0[i * 3 + 1], z1 = pos0[i * 3 + 2];
             const r1 = Math.hypot(x1, y1, z1) || 1e-6;
-            const MICRO_MIN = RMAX * 0.84; // ~0.714
-            const MICRO_MAX = RMAX * 0.99; // ~0.8415
-            if (r1 < MICRO_MIN || r1 > MICRO_MAX) continue; // bias to outer nodes
-            for (let k = 0; k < 12 && ei < target; k++) {
-              const span = 5 + ((Math.random() * 70) | 0);
+            const MICRO_MIN = RMAX * 0.85; // tightened range
+            const MICRO_MAX = RMAX * 0.98;
+            if (r1 < MICRO_MIN || r1 > MICRO_MAX) continue;
+            for (let k = 0; k < 6 && ei < target; k++) { // reduced from 15 to 6 attempts
+              const span = 8 + ((Math.random() * 40) | 0); // smaller search range
               const j = (i + span) % M;
               const x2 = pos0[j * 3], y2 = pos0[j * 3 + 1], z2 = pos0[j * 3 + 2];
               const r2 = Math.hypot(x2, y2, z2) || 1e-6;
@@ -908,44 +1247,26 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
           }
         }
 
-        // Clustered edge groups: create 4 denser edge hubs with small mesh-like connectivity
-        if (ei < MAX_EDGES) {
-          const centersForEdges: Array<[number,number,number]> = hubCenters.length === 4 ? hubCenters : [
-            [ RMAX*0.58,  RMAX*0.05,  RMAX*0.52],
-            [-RMAX*0.62, -RMAX*0.10,  RMAX*0.56],
-            [ RMAX*0.10,  RMAX*0.68,  RMAX*0.28],
-            [-RMAX*0.16, -RMAX*0.30, -RMAX*0.70],
-          ] as any;
-          const CL_RAD = RMAX * 0.16;   // capture radius for cluster grouping
-          const LOCAL_DIST = 0.06;      // even shorter local connections
-          const STRIDE = 12;            // very dense sampling
-          for (let c = 0; c < centersForEdges.length && ei < MAX_EDGES; c++) {
-            const cx = centersForEdges[c][0], cy = centersForEdges[c][1], cz = centersForEdges[c][2];
+        // Simplified clustered edge groups: basic connectivity for performance
+        if (ei < MAX_EDGES && fourCores) {
+          const CL_RAD = RMAX * 0.15;   // reduced radius
+          const LOCAL_DIST = 0.06;      // shorter connections
+          const STRIDE = 20;            // larger stride for less sampling
+          for (let c = 0; c < Math.min(2, hubCenters.length) && ei < MAX_EDGES; c++) { // only process 2 clusters
+            const cx = hubCenters[c][0], cy = hubCenters[c][1], cz = hubCenters[c][2];
             for (let i = 0; i < M && ei < MAX_EDGES; i += STRIDE) {
               const x1 = pos0[i * 3], y1 = pos0[i * 3 + 1], z1 = pos0[i * 3 + 2];
               const dx = x1 - cx, dy = y1 - cy, dz = z1 - cz;
               if ((dx*dx + dy*dy + dz*dz) > (CL_RAD*CL_RAD)) continue;
-              // connect to a few nearby sampled neighbors to form small meshes
-              for (let k = 1; k <= 32 && ei < MAX_EDGES; k++) {
-                const j = (i + k * (STRIDE + 11)) % M;
+              // simplified connection pattern
+              for (let k = 1; k <= 8 && ei < MAX_EDGES; k++) { // reduced from 40 to 8
+                const j = (i + k * (STRIDE + 5)) % M;
                 const x2 = pos0[j * 3], y2 = pos0[j * 3 + 1], z2 = pos0[j * 3 + 2];
                 const dd = (x2-x1)*(x2-x1) + (y2-y1)*(y2-y1) + (z2-z1)*(z2-z1);
-                if (dd < LOCAL_DIST*LOCAL_DIST * 1.5) {
+                if (dd < LOCAL_DIST*LOCAL_DIST) {
                   edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
                   edgeData[ei * 6 + 3] = x2; edgeData[ei * 6 + 4] = y2; edgeData[ei * 6 + 5] = z2;
-                  // cluster id of j is clusterIdArr[j]
-                  edgeKind[ei] = (clusterIdArr[i] === clusterIdArr[j]) ? 1.0 : 0.0;
-                  ei++;
-                }
-                // add a second connection to create a tiny triangle mesh feel
-                const j2 = (j + STRIDE + 7) % M;
-                if (ei >= MAX_EDGES) break;
-                const x3 = pos0[j2 * 3], y3 = pos0[j2 * 3 + 1], z3 = pos0[j2 * 3 + 2];
-                const dd2 = (x3-x1)*(x3-x1) + (y3-y1)*(y3-y1) + (z3-z1)*(z3-z1);
-                if (dd2 < (LOCAL_DIST*LOCAL_DIST)) {
-                  edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
-                  edgeData[ei * 6 + 3] = x3; edgeData[ei * 6 + 4] = y3; edgeData[ei * 6 + 5] = z3;
-                  edgeKind[ei] = (clusterIdArr[i] === clusterIdArr[j2]) ? 1.0 : 0.0;
+                  edgeKind[ei] = 1.0; // all intra-cluster for simplicity
                   ei++;
                 }
               }
@@ -979,11 +1300,40 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
             }
           }
         }
+
+        // Core-chord edges: occasional long edges that cross the interior to add center structure
+        if (ei < MAX_EDGES) {
+          const CHORD_STEP = 60;
+          for (let i = 0; i < M && ei < MAX_EDGES; i += CHORD_STEP) {
+            const x1 = pos0[i * 3], y1 = pos0[i * 3 + 1], z1 = pos0[i * 3 + 2];
+            const r1 = Math.hypot(x1, y1, z1) || 1e-6;
+            if (r1 < 0.45) continue; // skip deep center origins
+            // pick a roughly opposite point to ensure center-crossing
+            const j = (i + ((M / 2) | 0) + ((Math.random() * 200) | 0)) % M;
+            const x2 = pos0[j * 3], y2 = pos0[j * 3 + 1], z2 = pos0[j * 3 + 2];
+            const r2 = Math.hypot(x2, y2, z2) || 1e-6;
+            if (r2 < 0.45) continue;
+            // strong angular separation
+            const ux1 = x1 / r1, uy1 = y1 / r1, uz1 = z1 / r1;
+            const ux2 = x2 / r2, uy2 = y2 / r2, uz2 = z2 / r2;
+            const angular = ux1 * ux2 + uy1 * uy2 + uz1 * uz2; // cos angle
+            if (angular < -0.2) { // more opposite
+              // add a gentle curve as well
+              if (addCurvedEdge(x1, y1, z1, x2, y2, z2, (clusterIdArr[i] === clusterIdArr[j]) ? 1.0 : 0.0)) {
+                ei = edgeCount;
+              }
+            }
+          }
+        }
+
         
         edgeCount = ei;
+        // Store edge data for sparkle effects
+        edgeCountRef.current = edgeCount;
+        edgeDataRef.current = edgeData.slice(0, edgeCount * 6);
         if (edgeCount > 0) {
-          // Aggressive thinning in low-count mode; softer in dense mode
-          const KEEP_RATIO = isDense ? 0.30 : 0.55; // keep more due to higher node count
+        // Optimized edge retention for performance while maintaining visual appeal
+        const KEEP_RATIO = isDense ? 0.25 : 0.45; // reduced for better performance
           if (edgeCount > 0) {
             let write = 0;
             for (let t = 0; t < edgeCount; t++) {
@@ -1000,11 +1350,11 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
             }
             edgeCount = write;
           }
-          // Second pass reduction
+        // Second pass reduction - conservative for performance
           if (edgeCount > 0) {
             let write2 = 0;
             for (let t = 0; t < edgeCount; t++) {
-              if (Math.random() <= (isDense ? 0.30 : 0.65)) {
+            if (Math.random() <= (isDense ? 0.20 : 0.50)) { // reduced for better performance
                 const r = write2 * 6, s = t * 6;
                 edgeData[r + 0] = edgeData[s + 0];
                 edgeData[r + 1] = edgeData[s + 1];
@@ -1053,6 +1403,8 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       if (tagRafId) cancelAnimationFrame(tagRafId);
+      if (sparkleRafId) cancelAnimationFrame(sparkleRafId);
+      if (flowRafId) cancelAnimationFrame(flowRafId);
       if (asBackground && syncHandler) {
         try { window.removeEventListener(`login_zoom_sync_${syncKey}`, syncHandler as any as EventListener) } catch {}
       }
