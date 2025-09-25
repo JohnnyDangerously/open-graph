@@ -45,3 +45,4 @@ venv/
 # Misc
 .tmp_remote/
 .aws
+demo-clean/
