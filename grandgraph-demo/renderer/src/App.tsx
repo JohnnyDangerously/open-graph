@@ -10,6 +10,7 @@ import Sidebar from "./ui/Sidebar";
 import { setApiConfig, fetchBridgesTileJSON, fetchAvatarMap } from "./lib/api";
 import { fetchIntroPaths, type IntroPathsResult, fetchNearbyExecsAtCompany, fetchNetworkByFilter } from "./lib/api";
 import { resolveSmart, loadTileSmart } from "./smart";
+import { askNlq, type NlqResult } from "./lib/nlq";
 // demo modules removed
 import type { ParsedTile } from "./graph/parse";
 import { parseJsonTile } from "./graph/parse";
@@ -59,6 +60,22 @@ export default function App(){
   const [compareGroups, setCompareGroups] = useState<null | { left:number[], right:number[], overlap:number[] }>(null)
   const lastCompareIdsRef = useRef<{ a:string, b:string } | null>(null)
   const [rendererMode, setRendererMode] = useState<'canvas' | 'cosmograph'>('canvas')
+  const [featureNlq, setFeatureNlq] = useState<boolean>(()=>{ try{ return localStorage.getItem('FEATURE_NLQ')==='1' }catch{return false} })
+  const runNlq = async (qIn?: string) => {
+    if (!featureNlq) { setErr('NLQ is disabled in Settings'); return }
+    try {
+      const q = (qIn ?? '').trim()
+      if (!q) { setErr('Please enter a question'); return }
+      const res: NlqResult = await askNlq(q)
+      if (res.intent === 'unsupported') { setErr(res.reason || 'Question not supported'); return }
+      if (res.intent === 'show') { await run(`show ${res.args.id}`); return }
+      if (res.intent === 'bridges') { await run(`bridges ${res.args.left} + ${res.args.right}`); return }
+      if (res.intent === 'compare') { await run(`compare ${res.args.left} + ${res.args.right}`); return }
+      if (res.intent === 'paths') { await run(`paths ${res.args.S} -> ${res.args.company}${res.args.icp?` icp:${res.args.icp}`:''}${res.args.k?` k:${res.args.k}`:''}${res.args.minRMT!=null?` min_r_mt:${res.args.minRMT}`:''}`); return }
+      if (res.intent === 'migration') { await run(`migration ${res.args.left} * ${res.args.right}`); return }
+    } catch (e:any) { setErr(e?.message || 'NLQ failed') }
+  }
+  const [featureCompanyId, setFeatureCompanyId] = useState<boolean>(()=>{ try{ return localStorage.getItem('FEATURE_COMPANY_ID')==='1' }catch{return false} })
   const [profile, setProfile] = useState<PersonProfile | null>(null)
   const [profileOpen, setProfileOpen] = useState(false)
   const [introPathsResult, setIntroPathsResult] = useState<IntroPathsResult | null>(null)
@@ -121,6 +138,13 @@ export default function App(){
     if (!trimmed) throw new Error('Company value required for bridges')
     if (/^company:\d+$/i.test(trimmed)) return `company:${trimmed.slice(trimmed.indexOf(':') + 1)}`
     if (/^\d+$/.test(trimmed)) return `company:${trimmed}`
+    // Gate name lookup behind feature toggle; otherwise require canonical id
+    try {
+      if (featureCompanyId) {
+        // naive pass-through for now; future: resolve name -> id
+        throw new Error('Provide canonical company:<id> (numeric)')
+      }
+    } catch {}
     throw new Error('Provide canonical company:<id> (numeric)')
   }
 
@@ -1621,14 +1645,7 @@ export default function App(){
           onRegionClick={onRegionClick}
         />
       )}
-      <div style={{ position:'absolute', top:16, right:24, zIndex:30, display:'flex', gap:8 }}>
-        <button
-          onClick={()=> setRendererMode(mode => mode === 'canvas' ? 'cosmograph' : 'canvas')}
-          style={{ padding:'6px 12px', borderRadius:8, border:'1px solid var(--dt-border)', background:'var(--dt-fill-med)', color:'var(--dt-text)', fontSize:13 }}
-        >
-          Renderer: {rendererMode === 'canvas' ? 'Canvas' : 'Cosmograph'} (switch)
-        </button>
-      </div>
+      {/* renderer toggle moved into CommandBar */}
       <Sidebar 
         open={sidebarOpen} 
         onToggle={()=>setSidebarOpen(!sidebarOpen)} 
@@ -1697,6 +1714,10 @@ export default function App(){
         focus={focus}
         selectedIndex={selectedIndex}
         onSettings={()=>setShowSettings(true)}
+        rendererMode={rendererMode}
+        onRendererChange={(mode)=> setRendererMode(mode)}
+        enableNlq={featureNlq}
+        onNlq={runNlq}
       />
       {/* HUD is now replaced by inline controls within CommandBar */}
       {/* demo buttons removed */}
@@ -1706,7 +1727,16 @@ export default function App(){
         </div>
       )}
       {showSettings && (
-        <Settings apiBase={apiBase} bearer={bearer} onSave={({apiBase,bearer})=>{ setApiBase(apiBase); setBearer(bearer); setApiConfig(apiBase,bearer); setShowSettings(false); }} onClose={()=>setShowSettings(false)} />
+        <Settings
+          apiBase={apiBase}
+          bearer={bearer}
+          features={{ enableNlq: featureNlq, enableCompanyId: featureCompanyId }}
+          onFeaturesChange={({ enableNlq, enableCompanyId })=>{ setFeatureNlq(enableNlq); setFeatureCompanyId(enableCompanyId) }}
+          onSave={({apiBase,bearer,user,password,profilesDb,viaDb})=>{
+            setApiBase(apiBase); setBearer(bearer); setApiConfig(apiBase,bearer,user,password); try{ localStorage.setItem('DB_PROFILES', profilesDb||'default'); localStorage.setItem('DB_VIA', viaDb||'via_cluster') }catch{}; setShowSettings(false);
+          }}
+          onClose={()=>setShowSettings(false)}
+        />
       )}
       {/* demo modals removed */}
     </div>

@@ -9,19 +9,73 @@ const normalizeBase = (u:string) => {
   }
 }
 let BASE = normalizeBase(localStorage.getItem('API_BASE_URL') || 'http://34.236.80.1:8123')
-// Helper: robust ClickHouse exec via POST to avoid URL length limits (proxies may 404 long GETs)
+let USER = (localStorage.getItem('API_USER') || '')
+let PASS = (localStorage.getItem('API_PASSWORD') || '')
+let DB_PROFILES = (localStorage.getItem('DB_PROFILES') || 'default')
+let DB_VIA = (localStorage.getItem('DB_VIA') || 'via_cluster')
+let T = {
+  PERSON_PROFILE: `${DB_PROFILES}.person_profile_current`,
+  STINTS: `${DB_VIA}.stints_compact_min`,
+  COMPANIES: `${DB_VIA}.companies_mt`,
+  SEARCH_PEOPLE: `${DB_VIA}.search_people`
+}
+function updateTables(){
+  T = {
+    PERSON_PROFILE: `${DB_PROFILES}.person_profile_current`,
+    STINTS: `${DB_VIA}.stints_compact_min`,
+    COMPANIES: `${DB_VIA}.companies_mt`,
+    SEARCH_PEOPLE: `${DB_VIA}.search_people`
+  }
+}
+// Helper: robust ClickHouse exec via POST. Dual-mode:
+// - Direct CH: POST raw SQL to BASE/?default_format=JSONEachRow
+// - Gateway: POST JSON { sql } to BASE/sql
 async function execCH(sql: string, opts?: { signal?: AbortSignal, timeoutMs?: number, retry?: number }){
-  const url = `${BASE}/?default_format=JSONEachRow`
+  const isGatewayForced = (()=>{ try { return localStorage.getItem('API_GATEWAY') === '1' } catch { return false } })()
+  const looksGateway = /:(8000|8080|3000)\b/.test(BASE) || /\/api\b/.test(BASE)
+  const useGateway = isGatewayForced || looksGateway
+
   const controller = new AbortController()
   const timer = setTimeout(()=>{ try { controller.abort() } catch {} }, Math.max(1000, opts?.timeoutMs ?? 12000))
   const signal = opts?.signal ?? controller.signal
-  try {
+
+  const runDirectCH = async (): Promise<Response> => {
+    const url = `${BASE}/?default_format=JSONEachRow`
     const res = await fetch(url, { method: 'POST', mode: 'cors', headers: { 'Content-Type': 'text/plain; charset=utf-8', ...authHeaders() }, body: sql, signal })
+    return res
+  }
+
+  const runGateway = async (): Promise<Response> => {
+    const url = `${BASE.replace(/\/$/,'')}/sql`
+    const res = await fetch(url, { method: 'POST', mode: 'cors', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ sql }), signal })
+    return res
+  }
+
+  try {
+    let res: Response | null = null
+    if (useGateway) {
+      try { res = await runGateway() } catch { res = null }
+      if (!res || !res.ok) {
+        // Fallback to direct CH if gateway is not available
+        try { res = await runDirectCH() } catch { res = null }
+      }
+    } else {
+      try { res = await runDirectCH() } catch { res = null }
+      if (!res || !res.ok) {
+        // Try gateway as fallback
+        try { res = await runGateway() } catch { res = null }
+      }
+    }
+
+    if (!res) {
+      const { raise } = await import('./errors')
+      raise('STEP_4_FETCH', 'NETWORK', 'Network/timeout/abort', { sqlHead: sql.slice(0,160) })
+    }
+
     if (!res.ok) {
       const txt = await res.text().catch(()=> '')
       const meta = { status: res.status, code: res.headers.get('X-ClickHouse-Exception-Code') || '', sqlHead: sql.slice(0,160), bodyHead: txt.slice(0,240) }
       try { console.warn('execCH error', meta) } catch {}
-      // Simple one-shot retry on 5xx
       if (res.status >= 500 && (opts?.retry ?? 1) > 0) {
         return await execCH(sql, { ...opts, retry: 0 })
       }
@@ -39,13 +93,23 @@ async function execCH(sql: string, opts?: { signal?: AbortSignal, timeoutMs?: nu
 export const setApiBase = (u:string) => { BASE = normalizeBase(u); try{ localStorage.setItem('API_BASE_URL', BASE) }catch{} }
 export const getApiBase = () => BASE
 let BEARER = (localStorage.getItem('API_BEARER') || '')
-export const setApiConfig = (base?: string, bearer?: string) => {
+export const setApiConfig = (base?: string, bearer?: string, user?: string, password?: string) => {
   if (typeof base === 'string' && base.length) setApiBase(base)
   if (typeof bearer === 'string') { BEARER = bearer || ''; try { localStorage.setItem('API_BEARER', BEARER) } catch {} }
+  if (typeof user === 'string') { USER = user || ''; try { localStorage.setItem('API_USER', USER) } catch {} }
+  if (typeof password === 'string') { PASS = password || ''; try { localStorage.setItem('API_PASSWORD', PASS) } catch {} }
+}
+export const setDbConfig = (profilesDb?: string, viaDb?: string) => {
+  if (typeof profilesDb === 'string' && profilesDb.trim()) { DB_PROFILES = profilesDb.trim(); try { localStorage.setItem('DB_PROFILES', DB_PROFILES) } catch {} }
+  if (typeof viaDb === 'string' && viaDb.trim()) { DB_VIA = viaDb.trim(); try { localStorage.setItem('DB_VIA', DB_VIA) } catch {} }
+  updateTables()
 }
 const authHeaders = () => {
   const h: Record<string, string> = {}
   if (BEARER) h['Authorization'] = `Bearer ${BEARER}`
+  else if (USER) {
+    try { h['Authorization'] = `Basic ${btoa(`${USER}:${PASS||''}`)}` } catch {}
+  }
   return h
 }
 

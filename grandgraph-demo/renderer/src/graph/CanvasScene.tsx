@@ -41,7 +41,6 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
   const visibleMaskRef = useRef(null as boolean[] | null)
   const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 } as { width: number, height: number, dpr?: number })
   const [showTestToast, setShowTestToast] = useState<string | null>(null)
-  const [showBubbles, setShowBubbles] = useState(false)
   const [highlightDegree, setHighlightDegree] = useState<'all'|'first'|'second'>('all')
   const draggingNodeRef = useRef(null as Node | null)
   const dragLastRef = useRef<{ x: number, y: number } | null>(null)
@@ -1443,12 +1442,6 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       />
       {/* Simple overlay UI on the canvas */}
       <div style={{ position:'absolute', bottom:118, left:14, right:14, zIndex: 21, display:'flex', flexDirection:'row', flexWrap:'wrap', gap:6, alignItems:'center' }}>
-        <button
-          onClick={()=>{ setShowBubbles((v: boolean)=>!v); setShowTestToast('Button pressed!'); setTimeout(()=> setShowTestToast(null), 900) }}
-          style={{ padding:'4px 8px', borderRadius:8, background:'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', backdropFilter:'blur(4px)', fontSize:12 }}
-        >
-          {showBubbles ? 'Hide' : 'Show'} Feature
-        </button>
         {isPersonMode && (
           <div style={{ display:'flex', gap:6, alignItems:'center' }}>
             <span style={{ color:'#aaa', fontSize:12 }}>Highlight:</span>
@@ -1463,13 +1456,6 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
           </div>
         )}
       </div>
-      {showBubbles && (
-        <div style={{ position:'absolute', inset:0, zIndex: 1, overflow:'hidden', pointerEvents:'none' }}>
-          <div style={{ position:'absolute', left:0, top:0, right:0, bottom:0 }}>
-            <AnimatedNetworkBubbles />
-          </div>
-        </div>
-      )}
     </div>
   )
 })

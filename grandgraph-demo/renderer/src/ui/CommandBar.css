@@ -64,6 +64,43 @@
   gap: 8px;
 }
 
+.crux-segment {
+  display: inline-flex;
+  background: var(--dt-bg-elev-1);
+  border: 1px solid var(--dt-border);
+  border-radius: 10px;
+  padding: 2px;
+}
+
+.crux-segment > button {
+  background: transparent;
+  border: none;
+  color: var(--dt-text);
+  font-size: 11px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 80ms ease;
+}
+
+.crux-segment > button.is-active {
+  background: var(--dt-fill-weak);
+  border: 1px solid var(--dt-border);
+}
+
+.crux-segment > button:hover {
+  background: var(--dt-fill-med);
+}
+
+.crux-segment > button:active {
+  transform: translateY(1px);
+}
+
+.crux-segment > button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(120,160,255,0.35);
+}
+
 .crux-input-wrap {
   position: relative;
   background: var(--dt-bg-elev-1);
@@ -82,12 +119,19 @@
 }
 
 .crux-chip {
-  padding: 2px 6px;
-  border-radius: 8px;
+  padding: 3px 8px;
+  border-radius: 10px;
   font-size: 10px;
-  letter-spacing: 0.01em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   background: var(--dt-fill-weak);
   border: 1px solid var(--dt-border);
+  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.crux-chip:hover {
+  background: var(--dt-fill-med);
+  border-color: var(--dt-border-strong);
 }
 
 .crux-chip-entity {
@@ -323,10 +367,27 @@
   border-radius: 8px;
   color: var(--dt-text);
   font-size: 11px;
-  padding: 2px 6px;
+  padding: 6px 10px;
   cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 80ms ease;
 }
 
 .crux-top-button {
   line-height: 1.2;
+}
+
+.crux-top-button:hover,
+.crux-layout-inline button:hover {
+  background: var(--dt-fill-med);
+}
+
+.crux-top-button:active,
+.crux-layout-inline button:active {
+  transform: translateY(1px);
+}
+
+.crux-top-button:focus-visible,
+.crux-layout-inline button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(120,160,255,0.35);
 }

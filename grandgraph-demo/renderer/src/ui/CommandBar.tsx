@@ -12,6 +12,10 @@ type CommandBarProps = {
   focus?: string | null;
   selectedIndex?: number | null;
   onSettings?: () => void;
+  rendererMode?: 'canvas' | 'cosmograph';
+  onRendererChange?: (mode: 'canvas' | 'cosmograph') => void;
+  enableNlq?: boolean;
+  onNlq?: (question: string) => void;
   history?: HistoryEntry[];
   onPreview?: (evaluation: EvaluationResult | null) => void;
 };
@@ -41,12 +45,18 @@ export default function CommandBar(props: CommandBarProps) {
     focus,
     selectedIndex,
     onSettings,
+    rendererMode,
+    onRendererChange,
+    enableNlq,
+    onNlq,
     onPreview,
   } = props;
   const history = props.history ?? emptyHistoryRef.current;
 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState("");
+  const [nlqOpen, setNlqOpen] = useState(false);
+  const [nlqText, setNlqText] = useState("");
   const [selectionStart, setSelectionStart] = useState(0);
   const [selectionEnd, setSelectionEnd] = useState(0);
   const [activeSuggestion, setActiveSuggestion] = useState(0);
@@ -268,8 +278,41 @@ export default function CommandBar(props: CommandBarProps) {
           )}
         </div>
         <div className="crux-top-buttons">
+          {enableNlq && onNlq && (
+            <>
+              <button className="crux-top-button" onClick={()=> setNlqOpen(o=>!o)} title="Natural Language Query (Alpha)" aria-label="Natural Language Query">✨ NLQ</button>
+              {nlqOpen && (
+                <div className="crux-layout-inline" style={{ marginLeft: 4 }}>
+                  <input
+                    value={nlqText}
+                    onChange={(e)=> setNlqText(e.target.value)}
+                    onKeyDown={(e)=>{ if (e.key==='Enter') { e.preventDefault(); if (nlqText.trim()) onNlq(nlqText.trim()) } }}
+                    placeholder="Ask a question (use person:<id> / company:<id>)"
+                    style={{ background:'transparent', border:'none', color:'var(--dt-text)', outline:'none', fontSize:12, width:260 }}
+                  />
+                  <button className="crux-top-button" onClick={()=>{ if (nlqText.trim()) onNlq(nlqText.trim()) }}>Run</button>
+                </div>
+              )}
+            </>
+          )}
+          {onRendererChange && (
+            <div className="crux-segment" title="Switch render engine">
+              <button
+                className={classNames(rendererMode === 'canvas' && 'is-active')}
+                onClick={() => onRendererChange('canvas')}
+              >
+                Canvas
+              </button>
+              <button
+                className={classNames(rendererMode === 'cosmograph' && 'is-active')}
+                onClick={() => onRendererChange('cosmograph')}
+              >
+                Cosmograph
+              </button>
+            </div>
+          )}
           {onSettings && (
-            <button className="crux-top-button" onClick={onSettings}>Settings</button>
+            <button className="crux-top-button" onClick={onSettings} title="Settings" aria-label="Settings">⚙︎</button>
           )}
         </div>
       </div>
