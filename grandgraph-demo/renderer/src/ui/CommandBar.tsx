@@ -190,7 +190,16 @@ export default function CommandBar(props: CommandBarProps) {
     let replaceStart = selectionStart;
     let replaceEnd = selectionEnd;
     if (activeToken) {
-      if (activeToken.type === "filter") {
+      // Do not overwrite operators when caret is adjacent to them; insert beside instead
+      if ((activeToken.type === 'operator' || activeToken.type === 'set-op')) {
+        const atStart = selectionStart <= activeToken.start;
+        const atEnd = selectionStart >= activeToken.end;
+        if (atStart) { replaceStart = activeToken.start; replaceEnd = activeToken.start; }
+        else if (atEnd) { replaceStart = activeToken.end; replaceEnd = activeToken.end; }
+        // If caret is actually inside the operator token (rare for single-char), treat as after
+        else { replaceStart = activeToken.end; replaceEnd = activeToken.end; }
+      }
+      else if (activeToken.type === 'filter') {
         const filterToken = activeToken as FilterToken;
         const colonIx = activeToken.raw.indexOf(":");
         if (suggestion.type === "filter") {
@@ -201,8 +210,16 @@ export default function CommandBar(props: CommandBarProps) {
           replaceEnd = activeToken.end;
         }
       } else {
-        replaceStart = activeToken.start;
-        replaceEnd = activeToken.end;
+        // Default behavior had been to replace the active token. For operators, we
+        // want to append next to the current token so queries build up naturally
+        // e.g., "person:ID" + click "compare" → "person:ID >< ".
+        if (suggestion.type === 'operator') {
+          replaceStart = activeToken.end;
+          replaceEnd = activeToken.end;
+        } else {
+          replaceStart = activeToken.start;
+          replaceEnd = activeToken.end;
+        }
       }
     }
     insertAtRange(suggestion.value, replaceStart, replaceEnd, shouldPadAfter(suggestion));
