@@ -2,9 +2,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { EvaluationResult, HistoryEntry, Suggestion, Token, FilterToken } from "../crux/types";
 import { parseExpression } from "../crux/parser";
 import { evaluate } from "../crux/evaluator";
-import { getSuggestions } from "../crux/suggestions";
+import { getSuggestions, getSuggestionsAsync } from "../crux/suggestions";
 
 import "./CommandBar.css";
+import EntityBrowser from "./EntityBrowser";
 
 type CommandBarProps = {
   onRun: (expression: string, evaluation: EvaluationResult | null) => void | Promise<void>;
@@ -56,6 +57,7 @@ export default function CommandBar(props: CommandBarProps) {
   const [warningsOpen, setWarningsOpen] = useState(false);
   const [inputFocused, setInputFocused] = useState(false);
   const lastEvaluatedRef = useRef<string>("");
+  const [browseOpen, setBrowseOpen] = useState(false);
 
   const expression = useMemo(() => parseExpression(value), [value]);
   const activeToken = useMemo(() => {
@@ -64,9 +66,21 @@ export default function CommandBar(props: CommandBarProps) {
   }, [expression, selectionStart]);
 
   useEffect(() => {
-    const sugg = getSuggestions(expression, selectionStart, history);
-    setSuggestions(sugg);
+    // Kick off async suggestions with debounce + abort; fall back to quick local list
+    const local = getSuggestions(expression, selectionStart, history);
+    setSuggestions(local);
     setActiveSuggestion(0);
+    const controller = new AbortController();
+    const handle = window.setTimeout(async () => {
+      try {
+        const remote = await getSuggestionsAsync(expression, selectionStart, history, { signal: controller.signal });
+        if (!controller.signal.aborted && Array.isArray(remote) && remote.length > 0) {
+          setSuggestions(remote);
+          setActiveSuggestion(0);
+        }
+      } catch {}
+    }, DEBOUNCE_MS);
+    return () => { controller.abort(); window.clearTimeout(handle); };
   }, [expression, selectionStart, history]);
 
   // Listen for global inserts (e.g., graph node double-click)
@@ -268,9 +282,7 @@ export default function CommandBar(props: CommandBarProps) {
           )}
         </div>
         <div className="crux-top-buttons">
-          {onSettings && (
-            <button className="crux-top-button" onClick={onSettings}>Settings</button>
-          )}
+          <button onClick={()=> setBrowseOpen(true)} className="crux-btn">Browse…</button>
         </div>
       </div>
 
@@ -303,7 +315,7 @@ export default function CommandBar(props: CommandBarProps) {
                 className={classNames("crux-suggestion", idx === activeSuggestion && "is-active")}
                 onMouseDown={(e) => { e.preventDefault(); applySuggestion(sugg); }}
               >
-                <span className="crux-suggestion-value">{sugg.value}</span>
+                <span className="crux-suggestion-value">{sugg.label || sugg.value}</span>
                 <span className="crux-suggestion-desc">{sugg.description}</span>
               </button>
             ))}
@@ -316,6 +328,12 @@ export default function CommandBar(props: CommandBarProps) {
           evaluation={evaluation}
           onToggleWarnings={() => setWarningsOpen((open) => !open)}
           warningsOpen={warningsOpen}
+        />
+      )}
+      {browseOpen && (
+        <EntityBrowser
+          onPick={(val)=>{ insertAtRange(val, selectionStart, selectionEnd, true); setBrowseOpen(false) }}
+          onClose={()=> setBrowseOpen(false)}
         />
       )}
     </div>

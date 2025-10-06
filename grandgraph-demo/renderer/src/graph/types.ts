@@ -30,5 +30,7 @@ export type GraphSceneProps = {
   onRegionClick?: (region: 'left' | 'right' | 'overlap') => void
   selectedIndex?: number | null
   visibleMask?: boolean[] | null
+  maskMode?: 'hide' | 'dim'
+  degreeHighlight?: 'all' | 'first' | 'second'
+  onUnselect?: () => void
 }
-

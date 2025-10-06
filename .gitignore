@@ -4,6 +4,8 @@
 .LSOverride
 Icon\r
 
+paths-to-connect/
+
 # Node / Vite / Electron
 node_modules/
 dist/

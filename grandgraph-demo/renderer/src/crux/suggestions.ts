@@ -1,4 +1,5 @@
 import type { Expression, HistoryEntry, Suggestion, Token, FilterToken } from './types'
+import { suggestCompanies, suggestPeople } from '../lib/api'
 
 const FILTER_KEYS = [
   { key: 'role', description: 'Role or job function (role:engineer)' },
@@ -35,13 +36,24 @@ const OP_SUGGESTIONS: Suggestion[] = [
   { id: 'op-delta', type: 'operator', value: 'Δ', label: 'Δ delta', description: 'Delta compared to prior window' },
 ]
 
+// Always-visible seed suggestions to ensure UX never appears empty.
+// Verified companies from the dataset
 const ENTITY_STARTER: Suggestion[] = [
-  { id: 'person-randy-beck', type: 'entity', value: 'person:4686290173055902938', label: 'Randy Beck', description: 'Person id' },
-  { id: 'person-andrew-martin', type: 'entity', value: 'person:15772707043119431999', label: 'Andrew Martin', description: 'Person id' },
-  { id: 'entity-amazon', type: 'entity', value: 'company:2251329187646194655', label: 'Amazon.com Inc.', description: 'Company id' },
-  { id: 'entity-walmart', type: 'entity', value: 'company:14139580286565303534', label: 'Walmart Inc.', description: 'Company id' },
-  { id: 'entity-target', type: 'entity', value: 'company:618382097285902293', label: 'Target Corporation', description: 'Company id' },
-  { id: 'entity-jpm', type: 'entity', value: 'company:11145540422425190347', label: 'JPMorgan Chase & Co.', description: 'Company id' },
+  // People with very high neighbor counts (verified)
+  { id: 'seed-person-jill-cisneros', type: 'entity', value: 'person:17460185506374950457', label: 'Jill Cisneros', description: 'High-degree network' },
+  { id: 'seed-person-jodi-gomez', type: 'entity', value: 'person:758661163615411016', label: 'Jodi Gomez', description: 'High-degree network' },
+  { id: 'seed-person-mark-aguirre', type: 'entity', value: 'person:16187301763635908446', label: 'Mark Aguirre', description: 'High-degree network' },
+  { id: 'seed-person-melissa-williams', type: 'entity', value: 'person:10148933528123724725', label: 'Melissa Williams', description: 'High-degree network' },
+
+  // Bridge examples (keep good pairings)
+  { id: 'seed-bridge-amzn-walmart', type: 'history', value: 'company:11125032872491181068 ^ company:9946666062803016585', label: 'Bridges: Amazon.com Inc. ^ Walmart Inc.', description: 'Bridge candidates between companies' },
+  { id: 'seed-bridge-deloitte-wells', type: 'history', value: 'company:15386976225069648853 ^ company:16859218261549140953', label: 'Bridges: Deloitte ^ Wells Fargo & Company', description: 'Bridge candidates between companies' },
+
+  // Company placeholders (ids preserved, can be refined later)
+  { id: 'seed-co-amzn', type: 'entity', value: 'company:11125032872491181068', label: 'Amazon.com Inc.', description: 'Company' },
+  { id: 'seed-co-walmart', type: 'entity', value: 'company:9946666062803016585', label: 'Walmart Inc.', description: 'Company' },
+  { id: 'seed-co-target', type: 'entity', value: 'company:3548474563734415132', label: 'Target Corporation', description: 'Company' },
+  { id: 'seed-co-deloitte', type: 'entity', value: 'company:15386976225069648853', label: 'Deloitte', description: 'Company' },
 ]
 
 const VIEW_SUGGESTIONS: Suggestion[] = [
@@ -126,14 +138,16 @@ function contextFor(expression: Expression, caret: number): SuggestionContext {
   return { expecting, activeToken }
 }
 
+const SUGGESTION_LIMIT = 40
+
 function filterSuggestions(prefix: string, items: Suggestion[]): Suggestion[] {
-  if (!prefix) return items.slice(0, 8)
+  if (!prefix) return items.slice(0, SUGGESTION_LIMIT)
   const lower = prefix.toLowerCase()
   return items
     .map(item => ({ item, score: scoreMatch(lower, item.value.toLowerCase(), item.label.toLowerCase()) }))
     .filter(entry => entry.score > -Infinity)
     .sort((a,b)=> b.score - a.score)
-    .slice(0, 8)
+    .slice(0, SUGGESTION_LIMIT)
     .map(entry => entry.item)
 }
 
@@ -146,7 +160,9 @@ function scoreMatch(query: string, value: string, label: string): number {
   return -Infinity
 }
 
-export function getSuggestions(expression: Expression, caret: number, history: HistoryEntry[] = []): Suggestion[] {
+// Async-capable suggestion fetcher. For now we expose a sync wrapper used by UI; the UI
+// calls the async version via a small bridge to avoid changing its contract too much.
+export async function getSuggestionsAsync(expression: Expression, caret: number, history: HistoryEntry[] = [], opts?: { signal?: AbortSignal }): Promise<Suggestion[]> {
   const { expecting, activeToken } = contextFor(expression, caret)
   const prefix = (() => {
     if (!activeToken) return ''
@@ -180,18 +196,50 @@ export function getSuggestions(expression: Expression, caret: number, history: H
     return filterSuggestions(prefix, actions)
   }
 
-  const historySuggestions: Suggestion[] = history
-    .slice(0, 5)
-    .map((h, idx) => ({
-      id: `hist-${h.id}-${idx}`,
-      type: 'history' as const,
-      value: h.expression,
-      label: h.rendered || h.expression,
-      description: 'From history',
-    }))
+  // If no prefix, return curated seeds only (verified to work)
+  if (!prefix) {
+    return ENTITY_STARTER.slice(0, SUGGESTION_LIMIT)
+  }
 
-  const entitySuggestions = filterSuggestions(prefix, [...historySuggestions, ...ENTITY_STARTER])
-  return entitySuggestions
+  // If user typed a canonical prefix, run targeted lookup; otherwise mixed search
+  const pfx = (prefix || '').toLowerCase()
+  const out: Suggestion[] = []
+  try {
+    if (pfx.startsWith('company:')) {
+      const q = prefix.slice('company:'.length)
+      const rows = await suggestCompanies(q, 8, { signal: opts?.signal })
+      out.push(...rows.map((r, i) => ({ id: `co-${r.id}-${i}`, type: 'entity' as const, value: `company:${r.id}` , label: r.name || `company:${r.id}`, description: 'Company' })))
+    } else if (pfx.startsWith('person:')) {
+      const q = prefix.slice('person:'.length)
+      const rows = await suggestPeople(q, 8, { signal: opts?.signal })
+      out.push(...rows.map((r, i) => ({ id: `pe-${r.id}-${i}`, type: 'entity' as const, value: `person:${r.id}` , label: r.name || `person:${r.id}`, description: r.title ? `${r.title}${r.company ? ` • ${r.company}` : ''}` : (r.company || 'Person') })))
+    } else if (pfx.length >= 2) {
+      // Mixed search across both when user typed free text
+      const [cos, ppl] = await Promise.all([
+        suggestCompanies(prefix, 5, { signal: opts?.signal }).catch(()=>[]),
+        suggestPeople(prefix, 5, { signal: opts?.signal }).catch(()=>[]),
+      ])
+      out.push(...cos.map((r, i) => ({ id: `co-${r.id}-${i}`, type: 'entity' as const, value: `company:${r.id}`, label: r.name || `company:${r.id}`, description: 'Company' })))
+      out.push(...ppl.map((r, i) => ({ id: `pe-${r.id}-${i}`, type: 'entity' as const, value: `person:${r.id}`, label: r.name || `person:${r.id}`, description: r.title ? `${r.title}${r.company ? ` • ${r.company}` : ''}` : (r.company || 'Person') })))
+    }
+  } catch {}
+
+  // Ensure at least some helpful starters
+  const final = out.length > 0 ? [...out, ...ENTITY_STARTER] : ENTITY_STARTER
+  return filterSuggestions(prefix, final)
+}
+
+// Back-compat synchronous shim: used by existing UI call sites. It returns the best known
+// cached/fallback list immediately; the UI should ideally switch to getSuggestionsAsync.
+export function getSuggestions(expression: Expression, caret: number, history: HistoryEntry[] = []): Suggestion[] {
+  const { expecting } = contextFor(expression, caret)
+  if (expecting === 'operator') return filterSuggestions('', OP_SUGGESTIONS)
+  if (expecting === 'filter-key') {
+    const list = FILTER_KEYS.map(f => ({ id: `filter-${f.key}`, type:'filter' as const, value: `${f.key}:`, label: `${f.key}:`, description: f.description }))
+    return filterSuggestions('', list)
+  }
+  if (expecting === 'view') return filterSuggestions('', VIEW_SUGGESTIONS)
+  return [...ENTITY_STARTER]
 }
 
 function suggestValuesForFilter(filterToken: FilterToken, prefix: string): Suggestion[] {

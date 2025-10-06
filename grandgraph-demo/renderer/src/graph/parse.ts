@@ -109,6 +109,8 @@ export function parseJsonTile(j: any): ParsedTile {
     const group = new Uint16Array(count)
     const metaNodes: Array<any> = Array.isArray(j?.meta?.nodes) ? j.meta.nodes : []
     const coordGroups: Array<number> = Array.isArray(j?.coords?.groups) ? j.coords.groups : []
+    const mode: string = (j?.meta?.mode || '') as string
+    const isCompany = mode === 'company'
     for (let i = 0; i < count; i++) {
       const p = rawNodes[i]
       const x = Array.isArray(p) && typeof p[0] === 'number' ? p[0] : 0
@@ -121,8 +123,9 @@ export function parseJsonTile(j: any): ParsedTile {
       const g = (fromCoords ?? metaGroup ?? (i === 0 ? 1 : 1)) >>> 0
       group[i] = g
       const centerBias = g === 1 ? 1 : 0
-      const baseSize = g === 1 ? 1.2 : 0.9
-      const desired = typeof meta.size === 'number' ? meta.size : (baseSize + centerBias * 0.2)
+      // Company tiles: start with larger default sizes so downstream sizing rules have visible effect
+      const baseSize = g === 1 ? (isCompany ? 2.0 : 1.2) : 0.9
+      const desired = typeof meta.size === 'number' ? meta.size : (baseSize + centerBias * (isCompany ? 0.4 : 0.2))
       size[i] = Math.max(0.25, desired / 2.5)
       alpha[i] = g === 1 ? 0.9 : 0.78
     }

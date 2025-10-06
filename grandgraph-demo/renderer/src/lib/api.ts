@@ -8,7 +8,12 @@ const normalizeBase = (u:string) => {
     return u.replace(/[?#].*$/,'').replace(/\/+$/,'')
   }
 }
-let BASE = normalizeBase(localStorage.getItem('API_BASE_URL') || 'http://34.236.80.1:8123')
+// Configure API base:
+// Priority: ?api=<url> (query) → localStorage.API_BASE_URL → VITE_API_BASE → default
+const DEFAULT_BASE = normalizeBase((import.meta as any)?.env?.VITE_API_BASE || 'http://34.236.80.1:8123')
+const QUERY_BASE = (()=>{ try { return new URLSearchParams(window.location.search).get('api') || '' } catch { return '' } })()
+const STORED_BASE = (()=>{ try { return localStorage.getItem('API_BASE_URL') || '' } catch { return '' } })()
+let BASE = normalizeBase(QUERY_BASE || STORED_BASE || DEFAULT_BASE)
 // Helper: robust ClickHouse exec via POST to avoid URL length limits (proxies may 404 long GETs)
 async function execCH(sql: string, opts?: { signal?: AbortSignal, timeoutMs?: number, retry?: number }){
   const url = `${BASE}/?default_format=JSONEachRow`
@@ -16,11 +21,20 @@ async function execCH(sql: string, opts?: { signal?: AbortSignal, timeoutMs?: nu
   const timer = setTimeout(()=>{ try { controller.abort() } catch {} }, Math.max(1000, opts?.timeoutMs ?? 12000))
   const signal = opts?.signal ?? controller.signal
   try {
-    const res = await fetch(url, { method: 'POST', mode: 'cors', headers: { 'Content-Type': 'text/plain; charset=utf-8', ...authHeaders() }, body: sql, signal })
+    // Primary attempt: POST body (most reliable for long queries)
+    let res = await fetch(url, { method: 'POST', mode: 'cors', headers: { 'Content-Type': 'text/plain; charset=utf-8', ...authHeaders() }, body: sql, signal })
     if (!res.ok) {
+      // Some proxies/nginx return 404/405 for POST to '/' — fall back to GET with ?query=
+      if ((res.status === 404 || res.status === 405 || res.status === 400) && (opts?.retry ?? 1) > 0) {
+        try {
+          const fallback = `${BASE}/?default_format=JSONEachRow&query=${encodeURIComponent(sql)}`
+          const alt = await fetch(fallback, { method: 'GET', mode: 'cors', headers: { ...authHeaders() }, signal })
+          if (alt && alt.ok) return alt
+        } catch {}
+      }
       const txt = await res.text().catch(()=> '')
       const meta = { status: res.status, code: res.headers.get('X-ClickHouse-Exception-Code') || '', sqlHead: sql.slice(0,160), bodyHead: txt.slice(0,240) }
-      try { console.warn('execCH error', meta) } catch {}
+      try { if (!(opts && (opts as any).quiet)) console.warn('execCH error', meta) } catch {}
       // Simple one-shot retry on 5xx
       if (res.status >= 500 && (opts?.retry ?? 1) > 0) {
         return await execCH(sql, { ...opts, retry: 0 })
@@ -54,6 +68,13 @@ export async function fetchAvatarMap(personIds: Array<string|number>, batchSize 
   const out = new Map<string,string>()
   if (!Array.isArray(personIds) || personIds.length === 0) return out
   const ids = Array.from(new Set(personIds.map((id)=> String(id))))
+  const normalizeUrl = (u?: string|null): string => {
+    const s = String(u||'').trim()
+    if (!s) return ''
+    if (s.startsWith('http://')) return 'https://' + s.slice('http://'.length)
+    if (s.startsWith('//')) return 'https:' + s
+    return s
+  }
   for (let i=0;i<ids.length;i+=batchSize){
     const chunk = ids.slice(i, i+batchSize)
     const uuidLike = chunk.filter((s)=> s.includes('-'))
@@ -67,7 +88,7 @@ export async function fetchAvatarMap(personIds: Array<string|number>, batchSize 
         if (res0 && res0.ok){
           const txt0 = await res0.text()
           const lines0 = txt0.trim() ? txt0.trim().split('\n') : []
-          for (const line of lines0){ try { const row = JSON.parse(line); if (row?.id && row?.url) out.set(String(row.id), String(row.url)) } catch {} }
+          for (const line of lines0){ try { const row = JSON.parse(line); if (row?.id && row?.url) out.set(String(row.id), normalizeUrl(String(row.url))) } catch {} }
         }
       } catch {}
     }
@@ -80,7 +101,7 @@ export async function fetchAvatarMap(personIds: Array<string|number>, batchSize 
         if (res1 && res1.ok){
           const txt = await res1.text()
           const lines = txt.trim() ? txt.trim().split('\n') : []
-          for (const line of lines){ try { const row = JSON.parse(line); if (row?.id && row?.url) out.set(String(row.id), String(row.url)) } catch {} }
+          for (const line of lines){ try { const row = JSON.parse(line); if (row?.id && row?.url) out.set(String(row.id), normalizeUrl(String(row.url))) } catch {} }
         }
       } catch {}
     }
@@ -99,10 +120,39 @@ export async function fetchAvatarMap(personIds: Array<string|number>, batchSize 
         if (res2 && res2.ok){
           const txt2 = await res2.text()
           const lines2 = txt2.trim() ? txt2.trim().split('\n') : []
-          for (const line of lines2){ try { const row = JSON.parse(line); if (row?.id && row?.url) out.set(String(row.id), String(row.url)) } catch {} }
+          for (const line of lines2){ try { const row = JSON.parse(line); if (row?.id && row?.url) out.set(String(row.id), normalizeUrl(String(row.url))) } catch {} }
         }
       } catch {}
     }
+  }
+  return out
+}
+
+// Discover companies that currently have employees (strict current-only)
+export async function findCompaniesWithCurrentEmployees(limit = 50): Promise<Array<{ id: string, name?: string|null, current: number }>>{
+  const n = Math.max(1, Math.min(500, Number(limit)||50))
+  const sql = `
+    SELECT
+      toString(s.company_id) AS id,
+      anyLast(c.name) AS name,
+      count() AS current
+    FROM via_test.stints_compact s
+    LEFT JOIN via_test.companies_lite c ON c.company_id = s.company_id
+    WHERE (s.end_date IS NULL OR toDate(s.end_date) >= today())
+      AND toDate(s.start_date) <= today()
+    GROUP BY s.company_id
+    ORDER BY current DESC
+    LIMIT ${n}
+  `
+  const res = await execCH(sql, { quiet: true })
+  const txt = await res!.text()
+  const lines = txt.trim() ? txt.trim().split('\n') : []
+  const out: Array<{ id: string, name?: string|null, current: number }> = []
+  for (const line of lines){
+    try {
+      const row = JSON.parse(line)
+      out.push({ id: String(row.id), name: row.name || null, current: Number(row.current||0) })
+    } catch {}
   }
   return out
 }
@@ -165,8 +215,259 @@ export async function fetchPersonProfile(personKey: string | number): Promise<Pe
   return { id: String(head.id), name: head.name, current_title: head.current_title, current_company_name: head.current_company_name, linkedin: head.linkedin, history }
 }
 
+export interface EdgeDecompositionNeighbor {
+  id: string
+  name?: string | null
+  title?: string | null
+  company?: string | null
+  companyId?: string | null
+  overlapDays: number
+  peerDays: number
+  communityDays: number
+  calendarDays: number
+  sharedCompanies: number
+  emailScore: number
+  linkedinConnections: number
+  companies: string[]
+}
+
+export interface EdgeDecompositionCenter {
+  id: string
+  canonicalId?: string
+  name?: string | null
+  title?: string | null
+  company?: string | null
+  companyId?: string | null
+  seniority?: number | null
+  linkedinConnections?: number | null
+}
+
+export interface EdgeDecompositionData {
+  center: EdgeDecompositionCenter
+  neighbors: EdgeDecompositionNeighbor[]
+}
+
+export async function fetchEdgeDecomposition(person: string | number, opts?: { limit?: number }): Promise<EdgeDecompositionData> {
+  const raw = String(person ?? '').trim()
+  if (!raw) throw new Error('Edge decomposition requires a person id')
+  const norm = raw.replace(/^person:/i, '').replace(/^user:/i, '')
+  if (!/^\d+$/.test(norm)) throw new Error('Provide person:<id> (numeric)')
+  const idLiteral = norm
+
+  // Center profile
+  const centerSql = `
+    SELECT
+      toString(pp.person_id)                    AS id,
+      anyLast(pp.name)                          AS name,
+      anyLast(pp.current_title)                 AS title,
+      anyLast(pp.current_company_name)          AS company,
+      anyLast(pp.current_company_id)            AS company_id,
+      anyLast(pl.connections)                   AS linkedin_connections,
+      (
+        SELECT anyLast(seniority_bucket)
+        FROM via_test.stints_compact
+        WHERE person_id = toUInt64(${idLiteral})
+      )                                        AS seniority
+    FROM via_test.person_profile_current pp
+    LEFT JOIN via_test.persons_large pl ON pl.person_id_64 = pp.person_id
+    WHERE pp.person_id = toUInt64(${idLiteral})
+    GROUP BY pp.person_id
+    LIMIT 1
+  `
+
+  const centerRes = await execCH(centerSql, { quiet: true })
+  const centerTxt = await centerRes!.text()
+  let centerRow: any = null
+  if (centerTxt.trim()) {
+    try { centerRow = JSON.parse(centerTxt.trim().split('\n')[0]) } catch {}
+  }
+
+  const centerIdRaw = centerRow?.id ? String(centerRow.id) : String(idLiteral)
+  const center: EdgeDecompositionCenter = {
+    id: centerIdRaw,
+    canonicalId: `person:${centerIdRaw}`,
+    name: centerRow?.name ?? null,
+    title: centerRow?.title ?? null,
+    company: centerRow?.company ?? null,
+    companyId: centerRow?.company_id != null ? String(centerRow.company_id) : null,
+    seniority: typeof centerRow?.seniority === 'number' ? centerRow.seniority : null,
+    linkedinConnections: centerRow?.linkedin_connections != null ? Number(centerRow.linkedin_connections) : null,
+  }
+
+  const limit = Math.max(10, Math.min(400, Number(opts?.limit ?? 160)))
+  const centerSeniorityVal = center.seniority != null ? Number(center.seniority) : -999
+  const overlapExpr = `greatest(0, dateDiff('day', greatest(toDate(self.start_date), toDate(other.start_date)), least(toDate(ifNull(self.end_date, today())), toDate(ifNull(other.end_date, today())))))`
+
+  const neighborsSql = `
+    SELECT
+      toString(other.person_id)                              AS neighbor_id,
+      anyLast(other.person_id_str)                           AS person_id_str,
+      anyLast(pp.name)                                       AS name,
+      anyLast(pp.current_title)                              AS title,
+      anyLast(pp.current_company_name)                       AS company,
+      anyLast(pp.current_company_id)                         AS company_id,
+      uniqExact(other.company_id)                            AS shared_companies,
+      arrayFilter(x -> x != '', groupArrayDistinct(toString(other.company_id))) AS companies,
+      sum(${overlapExpr})                                    AS overlap_days,
+      sumIf(${overlapExpr}, other.seniority_bucket = ${centerSeniorityVal}) AS peer_days,
+      sumIf(${overlapExpr}, other.link_scope = 'GLOBAL')     AS community_days,
+      sumIf(${overlapExpr}, other.link_scope = 'PERSON')     AS calendar_days,
+      anyLast(pl.connections)                                AS linkedin_connections,
+      anyLast(es.main_score)                                 AS email_score
+    FROM via_test.stints_compact self
+    INNER JOIN via_test.stints_compact other ON self.company_id = other.company_id
+    LEFT JOIN via_test.person_profile_current pp ON pp.person_id = other.person_id
+    LEFT JOIN via_test.persons_large pl ON pl.person_id_64 = other.person_id
+    LEFT JOIN via_test.person_email_scores es ON es.person_id_str = other.person_id_str
+    WHERE self.person_id = toUInt64(${idLiteral})
+      AND other.person_id <> toUInt64(${idLiteral})
+    GROUP BY neighbor_id
+    HAVING overlap_days > 0
+    ORDER BY overlap_days DESC
+    LIMIT ${limit}
+  `
+
+  const res = await execCH(neighborsSql, { quiet: true })
+  const txt = await res!.text()
+  const lines = txt.trim() ? txt.trim().split('\n').filter(Boolean) : []
+  const neighbors: EdgeDecompositionNeighbor[] = lines.map(line => {
+    let row: any = {}
+    try { row = JSON.parse(line) } catch {}
+    const companies = Array.isArray(row?.companies)
+      ? row.companies.map((v: any) => String(v)).filter(Boolean)
+      : []
+    return {
+      id: row?.neighbor_id ? String(row.neighbor_id) : '',
+      name: row?.name ?? null,
+      title: row?.title ?? null,
+      company: row?.company ?? null,
+      companyId: row?.company_id != null ? String(row.company_id) : null,
+      overlapDays: Number(row?.overlap_days ?? 0) || 0,
+      peerDays: Number(row?.peer_days ?? 0) || 0,
+      communityDays: Number(row?.community_days ?? 0) || 0,
+      calendarDays: Number(row?.calendar_days ?? 0) || 0,
+      sharedCompanies: Number(row?.shared_companies ?? 0) || 0,
+      emailScore: Number(row?.email_score ?? 0) || 0,
+      linkedinConnections: Number(row?.linkedin_connections ?? 0) || 0,
+      companies,
+    }
+  }).filter(n => n.id)
+
+  return { center, neighbors }
+}
+
 export async function resolvePerson(_q: string){ return null as any }
 export async function resolveCompany(_q: string){ return null as any }
+
+// --- Lightweight search helpers for suggestions -----------------------------
+export async function suggestCompanies(prefix: string, limit = 8, opts?: { signal?: AbortSignal }): Promise<Array<{ id: string, name: string }>> {
+  const q = (prefix || '').trim()
+  if (!q) return []
+  const needle = q.replace(/'/g, "''")
+  const sql = `
+    SELECT toString(company_id) AS id, anyLast(name) AS name
+    FROM via_test.companies_lite
+    WHERE positionCaseInsensitive(name, '${needle}') > 0
+    GROUP BY company_id
+    ORDER BY length(name) ASC
+    LIMIT ${Math.max(1, Math.min(20, limit))}
+  `
+  const res = await execCH(sql, { signal: opts?.signal })
+  const txt = await res!.text()
+  const lines = txt.trim() ? txt.trim().split('\n') : []
+  const out: Array<{ id: string, name: string }> = []
+  for (const line of lines){ try { const row = JSON.parse(line); if (row?.id) out.push({ id: String(row.id), name: String(row.name||'') }) } catch {} }
+  return out
+}
+
+export async function suggestPeople(prefix: string, limit = 8, opts?: { signal?: AbortSignal }): Promise<Array<{ id: string, name?: string|null, title?: string|null, company?: string|null }>> {
+  const q = (prefix || '').trim()
+  if (!q) return []
+  const needle = q.replace(/'/g, "''")
+  const sql = `
+    SELECT toString(person_id) AS id,
+           anyLast(name) AS name,
+           anyLast(current_title) AS title,
+           anyLast(current_company_name) AS company
+    FROM via_test.person_profile_current
+    WHERE (notEmpty(coalesce(name,'')) AND positionCaseInsensitive(name, '${needle}') > 0)
+       OR (notEmpty(coalesce(current_company_name,'')) AND positionCaseInsensitive(current_company_name, '${needle}') > 0)
+    GROUP BY person_id
+    ORDER BY length(name) ASC
+    LIMIT ${Math.max(1, Math.min(20, limit))}
+  `
+  const res = await execCH(sql, { signal: opts?.signal })
+  const txt = await res!.text()
+  const lines = txt.trim() ? txt.trim().split('\n') : []
+  const out: Array<{ id: string, name?: string|null, title?: string|null, company?: string|null }> = []
+  for (const line of lines){ try { const row = JSON.parse(line); if (row?.id) out.push({ id: String(row.id), name: row.name||null, title: row.title||null, company: row.company||null }) } catch {} }
+  return out
+}
+
+// Paged browse: companies by name
+export async function browseCompanies(params: { q?: string, page?: number, pageSize?: number }, opts?: { signal?: AbortSignal }): Promise<{ items: Array<{ id: string, name: string }>, nextPage?: number|null }>{
+  const q = (params.q || '').trim()
+  const page = Math.max(0, Math.floor(params.page ?? 0))
+  const pageSize = Math.max(10, Math.min(100, Math.floor(params.pageSize ?? 25)))
+  const filter = q ? `WHERE positionCaseInsensitive(name, '${q.replace(/'/g, "''")}') > 0` : ''
+  const sql = `
+    WITH base AS (
+      SELECT toString(cl.company_id) AS id,
+             anyLast(cl.name) AS name,
+             ifNull(cc.c, 0) AS employees
+      FROM via_test.companies_lite cl
+      LEFT JOIN (
+        SELECT current_company_id AS company_id, count() AS c
+        FROM via_test.person_profile_current
+        GROUP BY current_company_id
+      ) cc ON cc.company_id = cl.company_id
+      GROUP BY cl.company_id
+    ), ranked AS (
+      SELECT *, row_number() OVER (PARTITION BY lowerUTF8(name) ORDER BY employees DESC, length(name) ASC, id ASC) AS rn
+      FROM base
+      ${filter}
+    )
+    SELECT id, name
+    FROM ranked
+    WHERE rn = 1
+    ORDER BY employees DESC, name ASC
+    LIMIT ${pageSize} OFFSET ${page * pageSize}
+  `
+  const res = await execCH(sql, { signal: opts?.signal })
+  const txt = await res!.text()
+  const lines = txt.trim() ? txt.trim().split('\n') : []
+  const items: Array<{ id: string, name: string }> = []
+  for (const line of lines){ try { const row = JSON.parse(line); if (row?.id) items.push({ id: String(row.id), name: String(row.name||'') }) } catch {} }
+  const nextPage = items.length < pageSize ? null : page + 1
+  return { items, nextPage }
+}
+
+// Paged browse: people by name or company substring
+export async function browsePeople(params: { q?: string, page?: number, pageSize?: number }, opts?: { signal?: AbortSignal }): Promise<{ items: Array<{ id: string, name: string, title?: string|null, company?: string|null }>, nextPage?: number|null }>{
+  const q = (params.q || '').trim()
+  const page = Math.max(0, Math.floor(params.page ?? 0))
+  const pageSize = Math.max(10, Math.min(100, Math.floor(params.pageSize ?? 25)))
+  const filt = q ? `WHERE (notEmpty(coalesce(name,'')) AND positionCaseInsensitive(name, '${q.replace(/'/g, "''")}') > 0)
+                      OR (notEmpty(coalesce(current_company_name,'')) AND positionCaseInsensitive(current_company_name, '${q.replace(/'/g, "''")}') > 0)` : ''
+  const sql = `
+    SELECT toString(person_id) AS id,
+           anyLast(name) AS name,
+           anyLast(current_title) AS title,
+           anyLast(current_company_name) AS company
+    FROM via_test.person_profile_current
+    ${filt}
+    GROUP BY person_id
+    ORDER BY length(name) ASC
+    LIMIT ${pageSize} OFFSET ${page * pageSize}
+  `
+  const res = await execCH(sql, { signal: opts?.signal })
+  const txt = await res!.text()
+  const lines = txt.trim() ? txt.trim().split('\n') : []
+  const items: Array<{ id: string, name: string, title?: string|null, company?: string|null }> = []
+  for (const line of lines){ try { const row = JSON.parse(line); if (row?.id) items.push({ id: String(row.id), name: String(row.name||''), title: row.title||null, company: row.company||null }) } catch {} }
+  const nextPage = items.length < pageSize ? null : page + 1
+  return { items, nextPage }
+}
 
 // Person ego (strict, JSON tile)
 export async function fetchEgoClientJSON(id: string, limit = 1500){
@@ -212,8 +513,43 @@ export async function fetchEgoClientJSON(id: string, limit = 1500){
     return lines.map(line => JSON.parse(line)) as Array<{id:number; w:number; name:string}>
   }
   
-  const neighbors = await executeNeighbors(key, MIN_OVERLAP_DAYS)
-  if (neighbors.length === 0) throw new Error('No overlapping coworkers (>=720 days) found')
+  // Try strict threshold first, then relax progressively to keep UX fluid
+  let neighbors = await executeNeighbors(key, MIN_OVERLAP_DAYS)
+  if (neighbors.length === 0) {
+    try { neighbors = await executeNeighbors(key, 360) } catch {}
+  }
+  if (neighbors.length === 0) {
+    try { neighbors = await executeNeighbors(key, 90) } catch {}
+  }
+  if (neighbors.length === 0) {
+    try { neighbors = await executeNeighbors(key, 1) } catch {}
+  }
+  // If still empty, return a minimal single-node tile so navigation does not error out
+  if (neighbors.length === 0) {
+    // Fetch center label if available
+    let centerName = `person:${key}`
+    let centerTitle: string | null = null
+    try {
+      const centerSQL = `
+        SELECT anyLast(name) AS name, anyLast(current_title) AS title
+        FROM via_test.person_profile_current
+        WHERE person_id = toUInt64(${key})
+        GROUP BY person_id
+        LIMIT 1`
+      const centerRes = await execCH(centerSQL)
+      const centerText = await centerRes!.text()
+      if (centerText.trim()) {
+        const row = JSON.parse(centerText.trim().split('\n')[0])
+        centerName = row?.name || centerName
+        centerTitle = row?.title || null
+      }
+    } catch {}
+    const nodes: Array<[number,number]> = [[0,0]]
+    const edges: Array<[number,number,number]> = []
+    const metaNodes = [ { id: String(key), name: centerName, full_name: centerName, title: centerTitle, group: 0, flags: 0 } ]
+    const labels = [centerName]
+    return { meta: { nodes: metaNodes, mode: 'person' }, coords: { nodes, edges }, labels }
+  }
 
   let centerName = 'Center'
   let centerTitle: string | null = null
@@ -363,7 +699,7 @@ export async function fetchCompanyEgoJSON(id: string, limit = 1500){
   if (!id.startsWith('company:')) throw new Error('company ego requires company:<id>')
   const key = id.replace(/^company:/,'')
 
-  const buildSql = (use64: boolean, currentOnly: boolean) => {
+  const buildSql = (use64: boolean, currentOnly: boolean, activeMonths?: number) => {
     const pid = use64 ? 'person_id' : 'person_id'
     const pidCast = use64 ? 'toUInt64(e.id)' : 'e.id'
     return `
@@ -372,6 +708,7 @@ export async function fetchCompanyEgoJSON(id: string, limit = 1500){
       FROM via_test.stints_compact
       WHERE company_id = toUInt64(${key})
         ${currentOnly ? "AND (end_date IS NULL OR toDate(end_date) >= today())" : ''}
+        ${!currentOnly && activeMonths ? `AND (toDate(ifNull(end_date, today())) >= addMonths(today(), -${Math.max(1, Math.floor(activeMonths))}))` : ''}
       GROUP BY toUInt64(${pid})
       ORDER BY c DESC
       LIMIT ${Math.min(limit, 1000)}
@@ -386,12 +723,30 @@ export async function fetchCompanyEgoJSON(id: string, limit = 1500){
 
   const exec = async (sql: string) => execCH(sql)
 
-  // Strict current-only
+  // Try 1: current-only via stints_compact
   let res = await exec(buildSql(true, true))
   let text = res && (res as Response).ok ? await (res as Response).text() : ''
   let rows = text.trim() ? text.trim().split('\n').map(l=>JSON.parse(l)) : [] as Array<{id:number; w:number; name:string, title?: string}>
-
-  if (rows.length === 0) { throw new Error('No current employees found for company') }
+  try { console.log('CompanyEmployees(current-only)', { company: String(key), rows: rows.length, sample: rows.slice(0,4) }) } catch {}
+  // Fallback 1: last 36 months active if current-only is empty
+  if (rows.length === 0) {
+    try {
+      const res2 = await exec(buildSql(true, false, 36))
+      const txt2 = res2 && (res2 as Response).ok ? await (res2 as Response).text() : ''
+      rows = txt2.trim() ? txt2.trim().split('\n').map(l=>JSON.parse(l)) : []
+      try { console.log('CompanyEmployees(active-36mo)', { company: String(key), rows: rows.length, sample: rows.slice(0,4) }) } catch {}
+    } catch {}
+  }
+  // Fallback 2: any historical employees if still empty
+  if (rows.length === 0) {
+    try {
+      const res3 = await exec(buildSql(true, false))
+      const txt3 = res3 && (res3 as Response).ok ? await (res3 as Response).text() : ''
+      rows = txt3.trim() ? txt3.trim().split('\n').map(l=>JSON.parse(l)) : []
+      try { console.log('CompanyEmployees(all-time)', { company: String(key), rows: rows.length, sample: rows.slice(0,4) }) } catch {}
+    } catch {}
+  }
+  if (rows.length === 0) { throw new Error('No employees found for company') }
 
   // Fetch company name for labeling
   let companyName = `company:${key}`
@@ -420,7 +775,7 @@ export async function fetchCompanyEgoJSON(id: string, limit = 1500){
   const metaNodes = new Array(count).fill(0).map((_, i) => (
     i===0
       ? { id: String(key), full_name: companyName, name: companyName, title: null, group: 0, flags: 0 }
-      : { id: String(rows[i-1]?.id||i), full_name: String(rows[i-1]?.name||''), name: String(rows[i-1]?.name||''), title: rows[i-1]?.title || null, group: 1, flags: 0 }
+      : { id: String(rows[i-1]?.id||i), person_id: String(rows[i-1]?.id||i), full_name: String(rows[i-1]?.name||''), name: String(rows[i-1]?.name||''), title: rows[i-1]?.title || null, group: 1, flags: 0 }
   ))
   const groups = new Array(count).fill(1)
   groups[0] = 0
@@ -428,7 +783,7 @@ export async function fetchCompanyEgoJSON(id: string, limit = 1500){
   const labels: string[] = new Array(count)
   labels[0] = companyName
   for (let i=1;i<count;i++) labels[i] = String(rows[i-1]?.name || '')
-  return { meta: { nodes: metaNodes }, coords: { nodes, edges, groups }, labels }
+  return { meta: { nodes: metaNodes, mode: 'company' }, coords: { nodes, edges, groups }, labels }
 }
 
 // Bridges query between two companies (left, right)
@@ -457,11 +812,21 @@ export async function fetchBridgesTileJSON(companyAId: string, companyBId: strin
   const nameA = rowA?.[0]?.name || `Company ${a}`
   const nameB = rowB?.[0]?.name || `Company ${b}`
 
-  // Bridge candidates: intersection of frontier-of-current(A) and frontier-of-current(B)
-  const candSql = `
+  // Bridge candidates: frontier of A and B. Prefer current-only; fallback to recent-active; then any tenure.
+  const makeCand = (mode: 'current'|'active60'|'any') => `
     WITH
-      a AS (SELECT toUInt64(person_id) AS pid FROM via_test.stints_compact WHERE company_id = toUInt64(${a}) AND end_date IS NULL GROUP BY pid),
-      b AS (SELECT toUInt64(person_id) AS pid FROM via_test.stints_compact WHERE company_id = toUInt64(${b}) AND end_date IS NULL GROUP BY pid),
+      a AS (
+        SELECT toUInt64(person_id) AS pid FROM via_test.stints_compact
+        WHERE company_id = toUInt64(${a})
+          ${mode==='current' ? 'AND end_date IS NULL' : mode==='active60' ? "AND toDate(ifNull(end_date, today())) >= addMonths(today(), -60)" : ''}
+        GROUP BY pid
+      ),
+      b AS (
+        SELECT toUInt64(person_id) AS pid FROM via_test.stints_compact
+        WHERE company_id = toUInt64(${b})
+          ${mode==='current' ? 'AND end_date IS NULL' : mode==='active60' ? "AND toDate(ifNull(end_date, today())) >= addMonths(today(), -60)" : ''}
+        GROUP BY pid
+      ),
       front_a AS (
         SELECT toUInt64(s2.person_id) AS pid,
                sum(greatest(0, dateDiff('day', greatest(toDate(s1.start_date), toDate(s2.start_date)), least(toDate(ifNull(s1.end_date, today())), toDate(ifNull(s2.end_date, today())))))) AS daysA
@@ -497,7 +862,9 @@ export async function fetchBridgesTileJSON(companyAId: string, companyBId: strin
     ORDER BY least(months_a, months_b) DESC
     LIMIT ${Math.max(10, Math.min(600, limit))}`
 
-  const bridgeRows = await exec(candSql) as Array<{id:string,name?:string,months_a?:number,months_b?:number}>
+  let bridgeRows = await exec(makeCand('current')) as Array<{id:string,name?:string,months_a?:number,months_b?:number}>
+  if (!bridgeRows?.length) bridgeRows = await exec(makeCand('active60')) as any
+  if (!bridgeRows?.length) bridgeRows = await exec(makeCand('any')) as any
 
   const leftAnchor = { id: `company:${a}`, name: nameA, title: null, company: nameA, group: 0 }
   const rightAnchor = { id: `company:${b}`, name: nameB, title: null, company: nameB, group: 2 }
@@ -684,7 +1051,7 @@ export async function fetchMigrationPairs(companyAId: string, companyBId: string
     ORDER BY movers DESC
     LIMIT ${limit}
   `
-  const res = await execCH(sql)
+  const res = await execCH(sql, { quiet: true })
   if (!res || !res.ok) {
     const txt = await res?.text().catch(()=>'' as any)
     throw new Error(`migration query failed ${res ? res.status : '???'}: ${String(txt||'').slice(0,160)}`)
@@ -712,6 +1079,9 @@ export type IntroPathsResult = {
   Ts: Array<{ id:string, icp:number, title?:string|null, name?:string|null }>
   paths: IntroPath[]
   top3: IntroPath[]
+  edgesMT?: Array<{ M:string, T:string, months:number }>
+  sName?: string | null
+  companyName?: string | null
 }
 
 function clamp01(x:number){ return Math.max(0, Math.min(1, x)) }
@@ -726,7 +1096,7 @@ function safeRegex(s?: string | null){
 export async function fetchIntroPaths(params: { S: string|number, companyId: string|number, icpRegex?: string, k?: number, minRMT?: number }): Promise<IntroPathsResult> {
   const S = String(params.S).replace(/^person:/i,'')
   const C = String(params.companyId).replace(/^company:/i,'')
-  const k = Math.max(1, Math.min(10, params.k ?? 3))
+  const k = Math.max(1, Math.min(80, params.k ?? 3))
   const minRMT = typeof params.minRMT === 'number' ? Math.max(0, Math.min(1, params.minRMT)) : 0.15
   const regex = safeRegex(params.icpRegex)
 
@@ -786,7 +1156,12 @@ export async function fetchIntroPaths(params: { S: string|number, companyId: str
   const TsLimited = Ts.slice(0, 240)
 
   if (MsLimited.length === 0 || TsLimited.length === 0) {
-    return { S: String(S), companyId: String(C), icpRegex: regex, Ms: MsLimited, Ts: TsLimited, paths: [], top3: [] }
+    // Fetch names for labeling even if empty
+    let compName: string | null = null
+    try { const r = await execCH(`SELECT anyLast(name) AS name FROM via_test.companies_lite WHERE company_id = toUInt64(${C}) LIMIT 1`); const tx = await r!.text(); const f = tx.trim().split('\n').filter(Boolean)[0]; if (f) compName = (JSON.parse(f).name as string) || null } catch {}
+    let sName: string | null = null
+    try { const rs = await execCH(`SELECT anyLast(name) AS name FROM via_test.person_profile_current WHERE person_id = toUInt64(${S}) LIMIT 1`); const txs = await rs!.text(); const fs = txs.trim().split('\n').filter(Boolean)[0]; if (fs) sName = (JSON.parse(fs).name as string) || null } catch {}
+    return { S: String(S), companyId: String(C), icpRegex: regex, Ms: MsLimited, Ts: TsLimited, paths: [], top3: [], edgesMT: [], sName, companyName: compName }
   }
 
   const list = (arr: Array<{id:string}>) => arr.map(r=>`toUInt64(${String(r.id)})`).join(',')
@@ -817,7 +1192,11 @@ export async function fetchIntroPaths(params: { S: string|number, companyId: str
   const MT = (mtTxt.trim() ? mtTxt.trim().split('\n').map(l=>JSON.parse(l)) : []) as Array<{ M:string, T:string, months:number }>
 
   if (MT.length === 0) {
-    return { S: String(S), companyId: String(C), icpRegex: regex, Ms: MsLimited, Ts: TsLimited, paths: [], top3: [] }
+    let compName: string | null = null
+    try { const r = await execCH(`SELECT anyLast(name) AS name FROM via_test.companies_lite WHERE company_id = toUInt64(${C}) LIMIT 1`); const tx = await r!.text(); const f = tx.trim().split('\n').filter(Boolean)[0]; if (f) compName = (JSON.parse(f).name as string) || null } catch {}
+    let sName: string | null = null
+    try { const rs = await execCH(`SELECT anyLast(name) AS name FROM via_test.person_profile_current WHERE person_id = toUInt64(${S}) LIMIT 1`); const txs = await rs!.text(); const fs = txs.trim().split('\n').filter(Boolean)[0]; if (fs) sName = (JSON.parse(fs).name as string) || null } catch {}
+    return { S: String(S), companyId: String(C), icpRegex: regex, Ms: MsLimited, Ts: TsLimited, paths: [], top3: [], edgesMT: [], sName, companyName: compName }
   }
 
   // 4) Exact M–T overlap at company C (for overlap_w boost)
@@ -894,7 +1273,12 @@ export async function fetchIntroPaths(params: { S: string|number, companyId: str
   diversified.sort((a,b)=> b.scores.p - a.scores.p)
   const top3 = diversified.slice(0, k)
 
-  return { S: String(S), companyId: String(C), icpRegex: regex, Ms: MsLimited, Ts: TsLimited, paths: diversified, top3 }
+  // Fetch names for anchors
+  let compName: string | null = null
+  try { const r = await execCH(`SELECT anyLast(name) AS name FROM via_test.companies_lite WHERE company_id = toUInt64(${C}) LIMIT 1`); const tx = await r!.text(); const f = tx.trim().split('\n').filter(Boolean)[0]; if (f) compName = (JSON.parse(f).name as string) || null } catch {}
+  let sName: string | null = null
+  try { const rs = await execCH(`SELECT anyLast(name) AS name FROM via_test.person_profile_current WHERE person_id = toUInt64(${S}) LIMIT 1`); const txs = await rs!.text(); const fs = txs.trim().split('\n').filter(Boolean)[0]; if (fs) sName = (JSON.parse(fs).name as string) || null } catch {}
+  return { S: String(S), companyId: String(C), icpRegex: regex, Ms: MsLimited, Ts: TsLimited, paths: diversified, top3, edgesMT: MT, sName, companyName: compName }
 }
 
 export async function fetchNearbyExecsAtCompany(params: { T: string|number, companyId: string|number, limit?: number }): Promise<Array<{ person_id:string, title?:string|null, seniority?:string|null, months_overlap:number }>>{
@@ -929,6 +1313,9 @@ export async function fetchNearbyExecsAtCompany(params: { T: string|number, comp
   const rows = txt.trim() ? txt.trim().split('\n').map(l=>JSON.parse(l)) as Array<{ person_id:string, title?:string|null, seniority?:string|null, months_overlap:number }> : []
   return rows
 }
+
+// --- Neighbor Company Aggregates (for person networks) ----------------------
+// (Removed duplicate earlier implementations of fetchNeighborCompanyAggregates and fetchNeighborIdsByCompany)
 
 export type NetworkFilterResult = {
   total: number
@@ -1115,6 +1502,183 @@ export async function fetchNetworkByFilter(params: { S: string|number, roleRegex
   return { total, matched, share, first, second }
 }
 
+// Total edge counts for a person ego (not display-compressed)
+// Returns:
+//  - first: number of first-degree neighbors (edges 0→first)
+//  - second: number of qualifying first↔second pairs (all, without LIMIT 1 BY sec_id)
+//  - total = first + second
+export async function countEgoEdgeTotals(params: { S: string|number, minFirstMonths?: number, minSecondMonths?: number }): Promise<{ first:number, second:number, total:number }>{
+  const S = String(params.S).replace(/^person:/i, '')
+  const minFirst = Math.max(1, Number(params.minFirstMonths) || MIN_OVERLAP_MONTHS)
+  const minSecond = Math.max(1, Number(params.minSecondMonths) || MIN_OVERLAP_MONTHS)
+  const sql = `
+    WITH
+      my AS (
+        SELECT company_id, start_date, end_date
+        FROM via_test.stints_compact
+        WHERE person_id = toUInt64(${S})
+      ),
+      neighbors AS (
+        SELECT
+          toUInt64(s.person_id) AS M,
+          sum(greatest(0, dateDiff(
+            'day',
+            greatest(toDate(s.start_date), toDate(m.start_date)),
+            least(toDate(ifNull(s.end_date, today())), toDate(ifNull(m.end_date, today())))
+          ))) AS days
+        FROM via_test.stints_compact s
+        INNER JOIN my m USING (company_id)
+        WHERE toUInt64(s.person_id) <> toUInt64(${S})
+        GROUP BY M
+        HAVING days >= ${minFirst * 30}
+      ),
+      pairs_raw AS (
+        SELECT
+          toUInt64(s1.person_id) AS first_id,
+          toUInt64(s2.person_id) AS sec_id,
+          sum(greatest(0, dateDiff(
+            'day',
+            greatest(toDate(s1.start_date), toDate(s2.start_date)),
+            least(toDate(ifNull(s1.end_date, today())), toDate(ifNull(s2.end_date, today())))
+          ))) AS days
+        FROM via_test.stints_compact s1
+        INNER JOIN via_test.stints_compact s2 ON s1.company_id = s2.company_id AND s1.person_id <> s2.person_id
+        WHERE toUInt64(s1.person_id) IN (SELECT M FROM neighbors)
+          AND toUInt64(s2.person_id) NOT IN (SELECT M FROM neighbors)
+          AND toUInt64(s2.person_id) <> toUInt64(${S})
+        GROUP BY first_id, sec_id
+        HAVING days >= ${minSecond * 30}
+      )
+    SELECT
+      (SELECT count() FROM neighbors) AS first,
+      (SELECT count() FROM pairs_raw) AS second
+  `
+  const res = await execCH(sql)
+  const txt = await res!.text()
+  const line = txt.trim().split('\n').filter(Boolean)[0]
+  if (!line) return { first: 0, second: 0, total: 0 }
+  try {
+    const row = JSON.parse(line)
+    const first = Number(row.first||0)
+    const second = Number(row.second||0)
+    return { first, second, total: first + second }
+  } catch { return { first: 0, second: 0, total: 0 } }
+}
+
+// Aggregate current companies for first-degree neighbors of a person S
+export async function fetchNeighborCompanyAggregates(params: { S: string|number, minOverlapMonths?: number, limit?: number }): Promise<Array<{ company_id?: string|null, company?: string|null, count: number }>>{
+  const S = String(params.S).replace(/^person:/i, '')
+  const minOverlapMonths = Math.max(1, Number(params.minOverlapMonths) || 24)
+  const limit = Math.max(5, Math.min(200, Number(params.limit) || 50))
+  const sql = `
+    WITH
+      my AS (
+        SELECT company_id, start_date, end_date
+        FROM via_test.stints_compact
+        WHERE person_id = toUInt64(${S})
+      ),
+      neighbors AS (
+        SELECT
+          toUInt64(s.person_id) AS M,
+          sum(greatest(0, dateDiff(
+            'day',
+            greatest(toDate(s.start_date), toDate(m.start_date)),
+            least(toDate(ifNull(s.end_date, today())), toDate(ifNull(m.end_date, today())))
+          ))) AS days
+        FROM via_test.stints_compact s
+        INNER JOIN my m USING (company_id)
+        WHERE toUInt64(s.person_id) <> toUInt64(${S})
+        GROUP BY M
+        HAVING days >= ${minOverlapMonths * 30}
+      )
+    SELECT anyLast(pp.current_company_name) AS company,
+           anyLast(pp.current_company_id) AS company_id,
+           count() AS count
+    FROM neighbors n
+    LEFT JOIN via_test.person_profile_current pp ON pp.person_id = n.M
+    WHERE notEmpty(coalesce(pp.current_company_name, ''))
+    GROUP BY pp.current_company_id
+    ORDER BY count DESC, company ASC
+    LIMIT ${limit}
+  `
+  const res = await execCH(sql)
+  const txt = await res!.text()
+  const rows = txt.trim() ? txt.trim().split('\n').map(l=>{ try { return JSON.parse(l) } catch { return {} } }) : []
+  return rows.map((r:any)=> ({ company_id: r.company_id != null ? String(r.company_id) : null, company: r.company || null, count: Number(r.count||0) }))
+}
+
+// Fetch current companies for a list of person ids
+export async function fetchCurrentCompaniesForPeople(ids: string[], batchSize = 800): Promise<Array<{ person_id: string, company_id?: string|null, company?: string|null }>> {
+  const out: Array<{ person_id: string, company_id?: string|null, company?: string|null }> = []
+  if (!Array.isArray(ids) || ids.length === 0) return out
+  const list = Array.from(new Set(ids.map((s)=> String(s))).values())
+  for (let i = 0; i < list.length; i += batchSize) {
+    const chunk = list.slice(i, i + batchSize)
+    const inList = chunk.map(id => `'${id.replace(/'/g, "''")}'`).join(',')
+    const sql = `
+      SELECT toString(person_id) AS person_id,
+             anyLast(current_company_id) AS company_id,
+             anyLast(current_company_name) AS company
+      FROM via_test.person_profile_current
+      WHERE toString(person_id) IN (${inList})
+      GROUP BY person_id
+    `
+    try {
+      const res = await execCH(sql)
+      if (res && res.ok) {
+        const txt = await res.text()
+        const lines = txt.trim() ? txt.trim().split('\n') : []
+        for (const line of lines) {
+          try {
+            const row = JSON.parse(line)
+            out.push({ person_id: String(row.person_id), company_id: row.company_id != null ? String(row.company_id) : null, company: row.company || null })
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+  return out
+}
+
+// Fetch neighbor person ids of S who currently work at a given company
+export async function fetchNeighborIdsByCompany(params: { S: string|number, companyId: string|number, minOverlapMonths?: number, limit?: number }): Promise<string[]> {
+  const S = String(params.S).replace(/^person:/i, '')
+  const C = String(params.companyId).replace(/^company:/i, '')
+  const minOverlapMonths = Math.max(1, Number(params.minOverlapMonths) || 24)
+  const limit = Math.max(10, Math.min(2000, Number(params.limit) || 1200))
+  const sql = `
+    WITH
+      my AS (
+        SELECT company_id, start_date, end_date
+        FROM via_test.stints_compact
+        WHERE person_id = toUInt64(${S})
+      ),
+      neighbors AS (
+        SELECT
+          toUInt64(s.person_id) AS M,
+          sum(greatest(0, dateDiff(
+            'day',
+            greatest(toDate(s.start_date), toDate(m.start_date)),
+            least(toDate(ifNull(s.end_date, today())), toDate(ifNull(m.end_date, today())))
+          ))) AS days
+        FROM via_test.stints_compact s
+        INNER JOIN my m USING (company_id)
+        WHERE toUInt64(s.person_id) <> toUInt64(${S})
+        GROUP BY M
+        HAVING days >= ${minOverlapMonths * 30}
+      )
+    SELECT toString(n.M) AS id
+    FROM neighbors n
+    INNER JOIN via_test.person_profile_current pp ON pp.person_id = n.M
+    WHERE pp.current_company_id = toUInt64(${C})
+    LIMIT ${limit}
+  `
+  const res = await execCH(sql)
+  const txt = await res!.text()
+  const rows = txt.trim() ? txt.trim().split('\n').map(l=>{ try { return JSON.parse(l) } catch { return {} } }) : []
+  return rows.map((r:any)=> String(r.id)).filter(Boolean)
+}
+
 export type NetworkEngineerStats = {
   total_neighbors: number
   engineers: number
@@ -1236,4 +1800,60 @@ export async function fetchNetworkEngineers(params: { S: string|number, minOverl
   }
   
   return { ...stats, top_engineers }
+}
+
+// Recent job changes for first-degree neighbors of a person S
+export async function fetchRecentNeighborJobChanges(params: { S: string|number, windowMonths?: number, limit?: number }): Promise<Array<{ person_id:string, person_name?:string|null, title?:string|null, company?:string|null, start_date:string }>>{
+  const S = String(params.S).replace(/^person:/i, '')
+  const windowMonths = Math.max(1, Number(params.windowMonths) || 24)
+  const limit = Math.max(5, Math.min(100, Number(params.limit) || 25))
+  const sql = `
+    WITH
+      my AS (
+        SELECT company_id, start_date, end_date
+        FROM via_test.stints_compact
+        WHERE person_id = toUInt64(${S})
+      ),
+      neighbors AS (
+        SELECT
+          toUInt64(s.person_id) AS M,
+          sum(greatest(0, dateDiff(
+            'day',
+            greatest(toDate(s.start_date), toDate(m.start_date)),
+            least(toDate(ifNull(s.end_date, today())), toDate(ifNull(m.end_date, today())))
+          ))) AS days
+        FROM via_test.stints_compact s
+        INNER JOIN my m USING (company_id)
+        WHERE toUInt64(s.person_id) <> toUInt64(${S})
+        GROUP BY M
+        HAVING days >= ${MIN_OVERLAP_DAYS}
+      ),
+      recent AS (
+        SELECT
+          toUInt64(s.person_id) AS person_id,
+          toDate(s.start_date)   AS start_date,
+          anyLast(c.name)        AS company,
+          anyLast(s.title_norm)  AS title
+        FROM via_test.stints_compact s
+        LEFT JOIN via_test.companies_lite c ON c.company_id = s.company_id
+        WHERE toUInt64(s.person_id) IN (SELECT M FROM neighbors)
+          AND toDate(s.start_date) >= addMonths(today(), -${windowMonths})
+        ORDER BY start_date DESC
+        LIMIT 1 BY person_id
+      )
+    SELECT toString(r.person_id) AS person_id,
+           anyLast(pp.name) AS person_name,
+           anyLast(r.title) AS title,
+           anyLast(r.company) AS company,
+           anyLast(toString(r.start_date)) AS start_date
+    FROM recent r
+    LEFT JOIN via_test.person_profile_current pp ON pp.person_id = r.person_id
+    GROUP BY r.person_id
+    ORDER BY toDate(start_date) DESC
+    LIMIT ${limit}
+  `
+  const res = await execCH(sql)
+  const txt = await res!.text()
+  const rows = txt.trim() ? txt.trim().split('\n').map(l=>{ try { return JSON.parse(l) } catch { return {} } }) : []
+  return rows.map((r:any)=> ({ person_id: String(r.person_id||''), person_name: r.person_name||null, title: r.title||null, company: r.company||null, start_date: String(r.start_date||'') }))
 }

@@ -1,13 +1,19 @@
-import React, { useRef, useState, useEffect, useMemo } from "react";
+import React, { useRef, useState, useEffect, useMemo, useCallback } from "react";
 import { MIN_OVERLAP_MONTHS } from "./lib/constants";
 import CanvasScene from "./graph/CanvasScene";
 import CosmoScene from "./graph/CosmoScene";
+import GpuScene from "./graph/GpuScene";
 import CommandBar from "./ui/CommandBar";
-import HUD from "./ui/HUD";
+import TabOverview from "./ui/TabOverview";
 import { fetchPersonProfile, type PersonProfile } from "./lib/api";
-import Settings from "./ui/Settings";
-import Sidebar from "./ui/Sidebar";
-import { setApiConfig, fetchBridgesTileJSON, fetchAvatarMap } from "./lib/api";
+// Legacy Sidebar retained for reference; replaced by SideDrawer
+import SideDrawer from "./ui/SideDrawer";
+import NodeList from "./ui/NodeList";
+import TabPeople from "./ui/TabPeople";
+import CompareLists from "./ui/CompareLists";
+import TabCompanies from "./ui/TabCompanies";
+import TabConnections from "./ui/TabConnections";
+import { fetchBridgesTileJSON, fetchAvatarMap, fetchEdgeDecomposition, type EdgeDecompositionData } from "./lib/api";
 import { fetchIntroPaths, type IntroPathsResult, fetchNearbyExecsAtCompany, fetchNetworkByFilter } from "./lib/api";
 import { resolveSmart, loadTileSmart } from "./smart";
 // demo modules removed
@@ -29,12 +35,42 @@ type RunOptions = {
   turnRadians?: number;
 };
 
+type EdgeFacetSummary = {
+  key: string
+  label: string
+  color: string
+  count: number
+}
+
+type EdgeDecompositionEdge = {
+  source: number
+  target: number
+  weight: number
+  facets: string[]
+}
+
+type EdgeDecompositionNeighborView = EdgeDecompositionData["neighbors"][number] & {
+  index: number
+  facets: string[]
+}
+
+type EdgeDecompositionView = {
+  tile: ParsedTile
+  center: EdgeDecompositionData["center"]
+  neighbors: EdgeDecompositionNeighborView[]
+  edges: EdgeDecompositionEdge[]
+  labels: string[]
+  metaNodes: Array<Record<string, unknown>>
+  facets: EdgeFacetSummary[]
+  palette: Record<string, string>
+}
+
 export default function App(){
   const [focus, setFocus] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const sceneRef = useRef<SceneRef | null>(null);
   const latestTileRef = useRef<ParsedTile | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
+  const [showFeaturePanel, setShowFeaturePanel] = useState(true);
   const [nodeCount, setNodeCount] = useState(0);
   const [labels, setLabels] = useState<string[]>([]);
   const [metaNodes, setMetaNodes] = useState<Array<{ id?: string|number, title?: string|null }>>([]);
@@ -44,12 +80,6 @@ export default function App(){
   const [cursor, setCursor] = useState(-1);
   // filters removed
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
-  const [apiBase, setApiBase] = useState<string>(()=>{
-    try { return localStorage.getItem('API_BASE_URL') || "http://34.236.80.1:8123" } catch { return "http://34.236.80.1:8123" }
-  });
-  const [bearer, setBearer] = useState<string>(()=>{
-    try { return localStorage.getItem('API_BEARER') || "" } catch { return "" }
-  });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [concentric, setConcentric] = useState(false);
   // demo state removed
@@ -57,40 +87,47 @@ export default function App(){
   const [selectedRegion, setSelectedRegion] = useState<null | 'left' | 'right' | 'overlap'>(null)
   const [sidebarIndices, setSidebarIndices] = useState<number[] | null>(null)
   const [compareGroups, setCompareGroups] = useState<null | { left:number[], right:number[], overlap:number[] }>(null)
+  const [compareLists, setCompareLists] = useState<null | { mutualF1:number[], aF1_bF2:number[], bF1_aF2:number[], aOnly:number[], bOnly:number[], mutualF1Raw?: string[], aF1_bF2Raw?: string[], bF1_aF2Raw?: string[] }>(null)
   const lastCompareIdsRef = useRef<{ a:string, b:string } | null>(null)
-  const [rendererMode, setRendererMode] = useState<'canvas' | 'cosmograph'>('canvas')
+  const [rendererMode, setRendererMode] = useState<'canvas' | 'cosmograph' | 'gpu'>(()=>{
+    try {
+      const sp = new URLSearchParams(window.location.search)
+      const q = sp.get('renderer') || localStorage.getItem('RENDERER_MODE') || 'canvas'
+      if (q === 'gpu' || q === 'cosmograph' || q === 'canvas') return q as any
+    } catch {}
+    return 'canvas'
+  })
+  React.useEffect(()=>{ try { localStorage.setItem('RENDERER_MODE', rendererMode) } catch {} }, [rendererMode])
+  const [maskMode, setMaskMode] = useState<'hide'|'dim'>('hide')
+  const [companiesMask, setCompaniesMask] = useState<boolean[] | null>(null)
+  const [connectionsMask, setConnectionsMask] = useState<boolean[] | null>(null)
+  const [degreeHighlight, setDegreeHighlight] = useState<'all'|'first'|'second'>('all')
   const [profile, setProfile] = useState<PersonProfile | null>(null)
   const [profileOpen, setProfileOpen] = useState(false)
   const [introPathsResult, setIntroPathsResult] = useState<IntroPathsResult | null>(null)
   const [introPathsTileMask, setIntroPathsTileMask] = useState<boolean[] | null>(null)
+  const [peopleSearchMask, setPeopleSearchMask] = useState<boolean[] | null>(null)
   const [selectedPathIndex, setSelectedPathIndex] = useState<number | null>(null)
   const [nearbyExecs, setNearbyExecs] = useState<Array<{ person_id:string, title?:string|null, seniority?:string|null, months_overlap:number }>>([])
   const runIdRef = useRef(0)
+  const [activeDrawerTab, setActiveDrawerTab] = useState<string>('nodes')
+  const [edgeDecompView, setEdgeDecompView] = useState<EdgeDecompositionView | null>(null)
+  const [edgeDecompFacet, setEdgeDecompFacet] = useState<string | null>(null)
+  const [edgeDecompMask, setEdgeDecompMask] = useState<boolean[] | null>(null)
+  const [edgeDecompLoading, setEdgeDecompLoading] = useState(false)
 
   const handleSceneRef = (instance: SceneRef | null) => {
     sceneRef.current = instance
   }
 
-  // Keep API module in sync with UI state on mount and whenever values change
-  useEffect(() => {
-    try { setApiConfig(apiBase, bearer) } catch {}
-  }, [apiBase, bearer])
-
-  // Migrate old/stale API base values to the new host automatically
-  useEffect(() => {
-    try {
-      const cur = (localStorage.getItem('API_BASE_URL') || '').trim()
-      const needsUpdate = /34\.192\.99\.41/.test(cur) || /127\.0\.0\.1/.test(cur)
-      if (needsUpdate) {
-        const next = 'http://34.236.80.1:8123'
-        localStorage.setItem('API_BASE_URL', next)
-        setApiBase(next)
-        setApiConfig(next, bearer)
-      }
-    } catch {}
-  // run once on mount
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const clearEdgeDecomposition = useCallback(() => {
+    setEdgeDecompView(null)
+    setEdgeDecompFacet(null)
+    setEdgeDecompMask(null)
+    setEdgeDecompLoading(false)
   }, [])
+
+  // API base is now configured via env/query/localStorage automatically in lib/api.ts
 
   useEffect(() => {
     if (sceneRef.current && latestTileRef.current) {
@@ -100,9 +137,27 @@ export default function App(){
     }
   }, [rendererMode])
 
+
+  // Restore active tab and focus from URL hash (best-effort)
+  useEffect(()=>{
+    try {
+      const raw = (window.location.hash||'').replace(/^#/,'')
+      if (!raw) return
+      const p = new URLSearchParams(raw)
+      const tab = p.get('tab')
+      const f = p.get('focus')
+      if (tab) setActiveDrawerTab(tab)
+      if (f) setFocus(f)
+    } catch {}
+  }, [])
+
   const visibleMask = useMemo(() => {
-    // If Intro Paths selection mask is active, prioritize it
+    // Priority: Edge Decomposition mask → Intro Paths → People Search → legacy filters
+    if (edgeDecompMask && edgeDecompMask.length) return edgeDecompMask
     if (introPathsTileMask && introPathsTileMask.length) return introPathsTileMask
+    if (peopleSearchMask && peopleSearchMask.length) return peopleSearchMask
+    if (connectionsMask && connectionsMask.length) return connectionsMask
+    if (companiesMask && companiesMask.length) return companiesMask
     if (!metaNodes || jobFilter === null || jobFilter.trim() === '') return null
     const q = jobFilter.toLowerCase()
     return metaNodes.map((m, idx) => {
@@ -110,7 +165,7 @@ export default function App(){
       const title = (m?.title || '').toLowerCase()
       return title.includes(q)
     })
-  }, [metaNodes, jobFilter, introPathsTileMask])
+  }, [metaNodes, jobFilter, edgeDecompMask, introPathsTileMask, peopleSearchMask, connectionsMask, companiesMask])
 
   // demo resize removed
 
@@ -134,16 +189,20 @@ export default function App(){
   }
 
   // --- Intro Paths: tile builder and command ---
+  const clearIntroPanels = () => {
+    try {
+      setIntroPathsResult(null)
+      setSelectedPathIndex(null)
+      setIntroPathsTileMask(null)
+      setNearbyExecs([])
+    } catch {}
+  }
   function buildIntroPathsTile(result: IntroPathsResult){
-    // Build 3-row layout: Start (S) at top, Bridges (unique Ms from top paths) middle, Targets (unique Ts from top paths) bottom
-    const uniqueM = Array.from(new Set(result.top3.map(p=>p.M)))
-    const uniqueT = Array.from(new Set(result.top3.map(p=>p.T)))
-    const mCount = Math.min(10, uniqueM.length || result.Ms.length)
-    const tCount = Math.min(10, uniqueT.length || result.Ts.length)
-    const ms = (uniqueM.length ? uniqueM : result.Ms.map(m=>m.id)).slice(0, mCount)
-    const ts = (uniqueT.length ? uniqueT : result.Ts.map(t=>t.id)).slice(0, tCount)
+    // Left–right, bridge-like layout: S anchor on left, company anchor on right, Ms and Ts between
+    const ms = result.Ms.map(m=>m.id).slice(0, Math.min(80, result.Ms.length))
+    const ts = result.Ts.map(t=>t.id).slice(0, Math.min(240, result.Ts.length))
 
-    const count = 1 + ms.length + ts.length
+    const count = 2 + ms.length + ts.length
     const nodes = new Float32Array(count * 2)
     const size = new Float32Array(count)
     const alpha = new Float32Array(count)
@@ -151,31 +210,14 @@ export default function App(){
     const labelsLocal: string[] = new Array(count)
     const metaLocal: Array<Record<string, unknown>> = new Array(count)
 
-    // Positions
-    const yTop = -280, yMid = 0, yBot = 280
-    // Center S
-    nodes[0] = 0; nodes[1] = yTop; size[0] = 16; alpha[0] = 1; group[0] = 0
-    labelsLocal[0] = introPathsResult?.paths?.[0]?.names?.S || result.S
+    // Anchors
+    const leftX = -3600, rightX = 3600
+    nodes[0] = leftX; nodes[1] = 0; size[0] = 14; alpha[0] = 1; group[0] = 0
+    labelsLocal[0] = (result as any).sName || introPathsResult?.paths?.[0]?.names?.S || result.S
     metaLocal[0] = { id: result.S, name: labelsLocal[0], group: 0 }
-
-    const placeRow = (ids: string[], startIndex: number, y: number, groupValue: number, names: Map<string, string|undefined>) => {
-      const n = ids.length
-      const spacing = Math.max(80, Math.min(260, Math.floor(800 / Math.max(1, n))))
-      const total = (n - 1) * spacing
-      for (let k=0;k<n;k++){
-        const i = startIndex + k
-        const x = -total/2 + k * spacing
-        nodes[i*2] = x
-        nodes[i*2+1] = y
-        size[i] = 9
-        alpha[i] = 0.96
-        group[i] = groupValue
-        const id = ids[k]
-        const label = names.get(id) || id
-        labelsLocal[i] = label as string
-        metaLocal[i] = { id, name: label, group: groupValue }
-      }
-    }
+    nodes[1] = rightX; nodes[3] = 0; size[1] = 14; alpha[1] = 1; group[1] = 2
+    labelsLocal[1] = (result as any).companyName || `company:${result.companyId}`
+    metaLocal[1] = { id: result.companyId, name: labelsLocal[1], group: 2 }
 
     // Name maps
     const mNames = new Map<string, string|undefined>()
@@ -183,39 +225,61 @@ export default function App(){
     const tNames = new Map<string, string|undefined>()
     result.Ts.forEach(t=>{ if (!tNames.has(t.id)) tNames.set(t.id, (t as any).name) })
 
-    // Place rows
-    placeRow(ms, 1, yMid, 1, mNames)
-    placeRow(ts, 1 + ms.length, yBot, 2, tNames)
+    // Ms in a wider grid near the left half
+    const startM = 2
+    const mCols = Math.min(12, Math.max(6, Math.ceil(Math.sqrt(Math.max(1, ms.length)))))
+    const mRows = Math.max(1, Math.ceil(ms.length / mCols))
+    const mX0 = -1600, mColGap = 260, mRowGap = 180
+    for (let idx=0; idx<ms.length; idx++){
+      const col = idx % mCols
+      const row = Math.floor(idx / mCols)
+      const i = startM + idx
+      const x = mX0 + col * mColGap
+      const y = (row - (mRows-1)/2) * mRowGap
+      nodes[i*2] = x; nodes[i*2+1] = y
+      size[i] = 10; alpha[i] = 0.96; group[i] = 1
+      const id = ms[idx]; const label = mNames.get(id) || id
+      labelsLocal[i] = label as string
+      metaLocal[i] = { id, name: label, group: 1 }
+    }
 
-    // Build edges for Top-3 only
+    // Ts in a wide grid near the right half
+    const startT = startM + ms.length
+    const tCols = Math.min(18, Math.max(8, Math.ceil(Math.sqrt(Math.max(1, ts.length)) * 1.6)))
+    const tRows = Math.max(1, Math.ceil(ts.length / tCols))
+    const tX0 = 400, tColGap = 260, tRowGap = 120
+    for (let idx=0; idx<ts.length; idx++){
+      const col = idx % tCols
+      const row = Math.floor(idx / tCols)
+      const i = startT + idx
+      const x = tX0 + col * tColGap
+      const y = (row - (tRows-1)/2) * tRowGap
+      nodes[i*2] = x; nodes[i*2+1] = y
+      size[i] = 9; alpha[i] = 0.95; group[i] = 2
+      const id = ts[idx]; const label = tNames.get(id) || id
+      labelsLocal[i] = label as string
+      metaLocal[i] = { id, name: label, group: 2 }
+    }
+
+    // Edges: only highlight Top-3 paths (S->M->T). Keep nodes for full slate.
     const edgesArr: Array<[number, number]> = []
     const weights: number[] = []
     const idToIndex = (id: string): number => {
-      const idxM = ms.indexOf(id); if (idxM >= 0) return 1 + idxM
-      const idxT = ts.indexOf(id); if (idxT >= 0) return 1 + ms.length + idxT
+      const mIdx = ms.indexOf(id); if (mIdx >= 0) return startM + mIdx
+      const tIdx = ts.indexOf(id); if (tIdx >= 0) return startT + tIdx
       return -1
     }
-    const usedPairs = new Set<string>()
-    for (const p of result.top3){
-      const mIdx = idToIndex(p.M)
-      const tIdx = idToIndex(p.T)
-      if (mIdx === -1 || tIdx === -1) continue
-      const key = `${mIdx}->${tIdx}`
-      if (usedPairs.has(key)) continue
-      usedPairs.add(key)
-      // S->M edge
-      edgesArr.push([0, mIdx])
-      weights.push(Math.max(1, Math.round(p.scores.R_SM * 10)))
-      // M->T edge
-      edgesArr.push([mIdx, tIdx])
-      weights.push(Math.max(1, Math.round(p.scores.R_MT * 10)))
+    const top = Array.isArray((result as any).top3) ? (result as any).top3 as any[] : []
+    for (const p of top){
+      const mi = idToIndex(p.M)
+      const ti = idToIndex(p.T)
+      if (mi>=0){ edgesArr.push([0, mi]); weights.push(Math.max(2, Math.round((p?.scores?.R_SM||0)*10))) }
+      if (mi>=0 && ti>=0){ edgesArr.push([mi, ti]); weights.push(Math.max(2, Math.round((p?.scores?.R_MT||0)*10))) }
     }
 
     const edges = new Uint16Array(edgesArr.length * 2)
     const edgeWeights = new Float32Array(weights.length)
-    for (let i=0;i<edgesArr.length;i++){
-      edges[i*2] = edgesArr[i][0]; edges[i*2+1] = edgesArr[i][1]; edgeWeights[i] = weights[i]
-    }
+    for (let i=0;i<edgesArr.length;i++){ edges[i*2] = edgesArr[i][0]; edges[i*2+1] = edgesArr[i][1]; edgeWeights[i] = weights[i] }
 
     const tile: ParsedTile & { labels?: string[], meta?: { nodes: Array<Record<string, unknown>> } } = {
       count,
@@ -228,8 +292,260 @@ export default function App(){
     } as any
     ;(tile as any).labels = labelsLocal
     ;(tile as any).meta = { nodes: metaLocal }
-    ;(tile as any).focusWorld = { x: 0, y: yMid }
+    ;(tile as any).focusWorld = { x: 0, y: 0 }
     return { tile, ms, ts }
+  }
+
+  const hashString = (s: string): number => {
+    let h = 2166136261 >>> 0
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i)
+      h = Math.imul(h, 16777619) >>> 0
+    }
+    return h >>> 0
+  }
+
+  function buildEdgeDecompositionView(data: EdgeDecompositionData): EdgeDecompositionView {
+    const neighborsSorted = (data.neighbors || [])
+      .filter((n) => n && n.overlapDays > 0)
+      .sort((a, b) => (b.overlapDays || 0) - (a.overlapDays || 0))
+
+    const maxNeighbors = 180
+    const topNeighbors = neighborsSorted.slice(0, maxNeighbors)
+    const count = 1 + topNeighbors.length
+
+    const nodes = new Float32Array(count * 2)
+    const size = new Float32Array(count)
+    const alpha = new Float32Array(count)
+    const group = new Uint16Array(count)
+    const labels: string[] = new Array(count)
+    const metaNodes: Array<Record<string, unknown>> = new Array(count)
+    const neighborIndexMap = new Map<string, number>()
+    const neighborsView: EdgeDecompositionNeighborView[] = []
+
+    const centerLabel = data.center.name || data.center.id || `person:${data.center.id}`
+    nodes[0] = 0
+    nodes[1] = 0
+    size[0] = 13
+    alpha[0] = 1
+    group[0] = 1
+    labels[0] = centerLabel
+    metaNodes[0] = {
+      id: data.center.id,
+      name: data.center.name || data.center.id,
+      title: data.center.title || null,
+      company: data.center.company || null,
+      company_id: data.center.companyId || null,
+      seniority: data.center.seniority ?? null,
+      linkedin_connections: data.center.linkedinConnections ?? null,
+      group: 1,
+    }
+
+    const maxOverlap = Math.max(1, topNeighbors[0]?.overlapDays ?? 1)
+    const ringConfigs = [
+      { radius: 320, capacity: 12 },
+      { radius: 520, capacity: 32 },
+      { radius: 760, capacity: 60 },
+      { radius: 980, capacity: Number.POSITIVE_INFINITY },
+    ]
+
+    let placed = 0
+    let nodeIndex = 1
+    for (const ring of ringConfigs) {
+      const remaining = topNeighbors.length - placed
+      if (remaining <= 0) break
+      const take = Math.min(ring.capacity, remaining)
+      for (let local = 0; local < take; local += 1) {
+        const neighbor = topNeighbors[placed]
+        const idx = nodeIndex
+        const baseAngle = (local / Math.max(1, take)) * Math.PI * 2
+        const angleJitter = ((hashString(`${neighbor.id}:angle`) % 3600) / 3600 - 0.5) * (Math.PI / 6)
+        const angle = baseAngle + angleJitter
+        const radiusJitter = ((hashString(`${neighbor.id}:radius`) % 1000) / 1000 - 0.5) * 48
+        const radius = ring.radius + radiusJitter
+        nodes[idx * 2] = Math.cos(angle) * radius
+        nodes[idx * 2 + 1] = Math.sin(angle) * radius
+        const strength = Math.max(1, neighbor.overlapDays || 0)
+        const sizeNorm = Math.max(3.2, 5.2 * Math.pow(strength / maxOverlap, 0.32))
+        size[idx] = sizeNorm
+        alpha[idx] = 0.92
+        group[idx] = 1
+        const label = neighbor.name || neighbor.company || neighbor.id
+        labels[idx] = label || neighbor.id
+        metaNodes[idx] = {
+          id: neighbor.id,
+          name: neighbor.name || neighbor.id,
+          title: neighbor.title || null,
+          company: neighbor.company || null,
+          company_id: neighbor.companyId || null,
+          overlap_days: neighbor.overlapDays,
+          peer_days: neighbor.peerDays,
+          community_days: neighbor.communityDays,
+          calendar_days: neighbor.calendarDays,
+          email_score: neighbor.emailScore,
+          linkedin_connections: neighbor.linkedinConnections,
+          shared_companies: neighbor.sharedCompanies,
+          companies: neighbor.companies,
+          group: 1,
+        }
+        neighborIndexMap.set(neighbor.id, idx)
+        neighborsView.push({ ...neighbor, index: idx, facets: [] })
+        placed += 1
+        nodeIndex += 1
+      }
+    }
+
+    const paletteDefaults: Record<string, string> = {
+      "Work History": "#60a5fa",
+      Email: "#22c55e",
+      Calendar: "#fb7185",
+      Peership: "#eab308",
+      Community: "#a78bfa",
+      Commercial: "#f97316",
+      LinkedIn: "#64748b",
+      "Triadic Closure": "#10b981",
+    }
+    const palette: Record<string, string> = { ...paletteDefaults }
+    if (typeof window !== 'undefined') {
+      try {
+        const style = window.getComputedStyle(document.documentElement)
+        const getVar = (name: string, fallback: string) => {
+          const v = style.getPropertyValue(name).trim()
+          return v || fallback
+        }
+        palette["Work History"] = getVar('--facet-work', palette["Work History"])
+        palette.Email = getVar('--facet-email', palette.Email)
+        palette.Calendar = getVar('--facet-calendar', palette.Calendar)
+        palette.Peership = getVar('--facet-peership', palette.Peership)
+        palette.Community = getVar('--facet-community', palette.Community)
+        palette.Commercial = getVar('--facet-commercial', palette.Commercial)
+        palette.LinkedIn = getVar('--facet-linkedin', palette.LinkedIn)
+        palette["Triadic Closure"] = getVar('--facet-triadic', palette["Triadic Closure"])
+      } catch {}
+    }
+
+    const edges: EdgeDecompositionEdge[] = []
+    const facetCounts = new Map<string, number>()
+
+    const addFacetCount = (facet: string) => {
+      facetCounts.set(facet, (facetCounts.get(facet) ?? 0) + 1)
+    }
+
+    const threshold = {
+      email: 60,
+      calendarDays: 30,
+      communityDays: 45,
+      peerDays: 45,
+      linkedin: 400,
+    }
+
+    const computeFacets = (neighbor: EdgeDecompositionNeighborView): string[] => {
+      const facets: string[] = ["Work History"]
+      if (neighbor.emailScore >= threshold.email) facets.push("Email")
+      if (neighbor.calendarDays >= threshold.calendarDays) facets.push("Calendar")
+      if (neighbor.peerDays >= threshold.peerDays) facets.push("Peership")
+      if (neighbor.communityDays >= threshold.communityDays) facets.push("Community")
+      const centerCompanyId = data.center.companyId || null
+      if (neighbor.sharedCompanies >= 2 && centerCompanyId && neighbor.companyId && neighbor.companyId !== centerCompanyId) {
+        facets.push("Commercial")
+      }
+      if (neighbor.linkedinConnections >= threshold.linkedin) facets.push("LinkedIn")
+      return facets
+    }
+
+    topNeighbors.forEach((neighbor, idx) => {
+      const nodeIdx = neighborIndexMap.get(neighbor.id)
+      if (typeof nodeIdx !== 'number') return
+      const weight = Math.max(1, (neighbor.overlapDays || 0) / 30)
+      const neighborView = neighborsView[idx]
+      if (!neighborView) return
+      const facets = computeFacets(neighborView)
+      neighborView.facets = facets
+      facets.forEach(addFacetCount)
+      edges.push({ source: 0, target: nodeIdx, weight, facets })
+    })
+
+    const triadicPairs = new Set<string>()
+    const maxTriadicEdges = 80
+    const companyMap = new Map<string, number[]>()
+    topNeighbors.forEach((neighbor) => {
+      const nodeIdx = neighborIndexMap.get(neighbor.id)
+      if (typeof nodeIdx !== 'number') return
+      (neighbor.companies || []).forEach((companyId) => {
+        if (!companyId) return
+        let arr = companyMap.get(companyId)
+        if (!arr) {
+          arr = []
+          companyMap.set(companyId, arr)
+        }
+        if (arr.length < 6) arr.push(nodeIdx)
+      })
+    })
+
+    for (const [, indices] of companyMap.entries()) {
+      if (triadicPairs.size >= maxTriadicEdges) break
+      for (let a = 0; a < indices.length; a += 1) {
+        for (let b = a + 1; b < indices.length; b += 1) {
+          if (triadicPairs.size >= maxTriadicEdges) break
+          const i = indices[a]
+          const j = indices[b]
+          if (i === j) continue
+          const key = i < j ? `${i}-${j}` : `${j}-${i}`
+          if (triadicPairs.has(key)) continue
+          triadicPairs.add(key)
+          edges.push({ source: i, target: j, weight: 1, facets: ["Triadic Closure"] })
+          addFacetCount("Triadic Closure")
+        }
+      }
+      if (triadicPairs.size >= maxTriadicEdges) break
+    }
+
+    const edgesArr = new Uint32Array(edges.length * 2)
+    const edgeWeights = new Float32Array(edges.length)
+    edges.forEach((edge, index) => {
+      edgesArr[index * 2] = edge.source
+      edgesArr[index * 2 + 1] = edge.target
+      edgeWeights[index] = edge.weight
+    })
+
+    const tile: ParsedTile & { labels?: string[]; meta?: { nodes: Array<Record<string, unknown>> } } = {
+      count,
+      nodes,
+      size,
+      alpha,
+      group,
+      edges: edgesArr,
+      edgeWeights,
+    } as any
+    ;(tile as any).labels = labels
+    ;(tile as any).meta = { nodes: metaNodes }
+    ;(tile as any).focusWorld = { x: 0, y: 0 }
+
+    const facetOrder: Array<{ key: string; label: string }> = [
+      { key: "Work History", label: "Work History" },
+      { key: "Email", label: "Email" },
+      { key: "Calendar", label: "Calendar" },
+      { key: "Peership", label: "Peership" },
+      { key: "Community", label: "Community" },
+      { key: "Commercial", label: "Commercial" },
+      { key: "LinkedIn", label: "LinkedIn" },
+      { key: "Triadic Closure", label: "Triadic Closure" },
+    ]
+
+    const facets: EdgeFacetSummary[] = facetOrder
+      .map(({ key, label }) => ({ key, label, color: palette[key] || '#888', count: facetCounts.get(key) ?? 0 }))
+      .filter((f) => f.count > 0)
+
+    return {
+      tile,
+      center: data.center,
+      neighbors: neighborsView,
+      edges,
+      labels,
+      metaNodes,
+      facets,
+      palette,
+    }
   }
 
   const executeIntroPathsCommand = async (params: { S: string, company: string, icp?: string, k?: number, minRMT?: number }) => {
@@ -470,8 +786,26 @@ export default function App(){
 
     lastCompareIdsRef.current = { a: leftId, b: rightId }
     const compareTile = buildCompareTile(leftTile as any, rightTile as any, highlight ? { highlight } : undefined)
+    try { console.log('buildCompareTile produced', {
+      count: compareTile.count,
+      labels: Array.isArray((compareTile as any).labels) ? (compareTile as any).labels.length : 0,
+      compareGroups: compareTile && (compareTile as any).compareIndexGroups ? {
+        left: ((compareTile as any).compareIndexGroups.left || []).length,
+        right: ((compareTile as any).compareIndexGroups.right || []).length,
+        overlap: ((compareTile as any).compareIndexGroups.overlap || []).length,
+      } : null,
+      compareLists: compareTile && (compareTile as any).compareLists ? {
+        shared: ((compareTile as any).compareLists.mutualF1 || []).length,
+        a1b2: ((compareTile as any).compareLists.aF1_bF2 || []).length,
+        b1a2: ((compareTile as any).compareLists.bF1_aF2 || []).length,
+        aOnly: ((compareTile as any).compareLists.aOnly || []).length,
+        bOnly: ((compareTile as any).compareLists.bOnly || []).length,
+      } : null,
+    }) } catch {}
+    try { (window as any).__COMPARE_LAST_TILE = compareTile } catch {}
 
     const labels = Array.isArray((compareTile as any).labels) ? (compareTile as any).labels as string[] : []
+    try { console.log('Compare tile labels', labels.length) } catch {}
     setLabels(labels)
     setMetaNodes([])
     // For compare, skip external avatar fallbacks to avoid rate limits
@@ -482,13 +816,44 @@ export default function App(){
       | undefined
     if (groups) {
       setCompareGroups(groups)
+      try { setCompareLists(((compareTile as any)?.compareLists) || null) } catch { setCompareLists(null) }
+      try { (window as any).__COMPARE_GROUPS = { groups, lists: (compareTile as any)?.compareLists || null } } catch {}
+      try { console.log('Compare groups stats', {
+        left: groups.left?.length || 0,
+        right: groups.right?.length || 0,
+        overlap: groups.overlap?.length || 0,
+        lists: {
+          shared: ((compareTile as any)?.compareLists?.mutualF1 || []).length,
+          a1b2: ((compareTile as any)?.compareLists?.aF1_bF2 || []).length,
+          b1a2: ((compareTile as any)?.compareLists?.bF1_aF2 || []).length,
+          aOnly: ((compareTile as any)?.compareLists?.aOnly || []).length,
+          bOnly: ((compareTile as any)?.compareLists?.bOnly || []).length,
+        }
+      }) } catch {}
       if (selectedRegion && (groups as any)[selectedRegion]) {
         setSidebarIndices((groups as any)[selectedRegion] || null)
       } else {
         setSidebarIndices(null)
       }
     } else {
-      setCompareGroups(null)
+      // If groups missing but tile has compare data, synthesize minimal groups for Overview
+      const compAny: any = compareTile as any
+      const fallbackGroups = compAny?.compareIndexGroups || null
+      setCompareGroups(fallbackGroups)
+      try { setCompareLists(compAny?.compareLists || null) } catch { setCompareLists(null) }
+      try { (window as any).__COMPARE_GROUPS = { groups: fallbackGroups, lists: compAny?.compareLists || null } } catch {}
+      try { console.log('Compare fallback stats', {
+        left: fallbackGroups?.left?.length || 0,
+        right: fallbackGroups?.right?.length || 0,
+        overlap: fallbackGroups?.overlap?.length || 0,
+        lists: {
+          shared: (compAny?.compareLists?.mutualF1 || []).length,
+          a1b2: (compAny?.compareLists?.aF1_bF2 || []).length,
+          b1a2: (compAny?.compareLists?.bF1_aF2 || []).length,
+          aOnly: (compAny?.compareLists?.aOnly || []).length,
+          bOnly: (compAny?.compareLists?.bOnly || []).length,
+        }
+      }) } catch {}
       setSidebarIndices(null)
     }
 
@@ -564,9 +929,11 @@ export default function App(){
     const alpha = new Float32Array(count)
     const group = new Uint16Array(count)
 
+    const leftLabel = (opts?.leftName && String(opts.leftName).trim()) || `company:${leftId.replace(/^company:/i, '')}`
+    const rightLabel = (opts?.rightName && String(opts.rightName).trim()) || `company:${rightId.replace(/^company:/i, '')}`
     const anchors: Array<{ id: string; name: string; x: number; y: number; group: number }> = [
-      { id: leftId, name: opts?.leftName || leftId, x: -480, y: 0, group: 0 },
-      { id: rightId, name: opts?.rightName || rightId, x: 480, y: 0, group: 2 },
+      { id: leftId, name: leftLabel, x: -480, y: 0, group: 0 },
+      { id: rightId, name: rightLabel, x: 480, y: 0, group: 2 },
     ]
 
     anchors.forEach((anchor, idx) => {
@@ -616,7 +983,15 @@ export default function App(){
       edgeWeights[edgePtr] = magnitude
       edgePtr += 1
 
-      const flowLabel = `${row.from_name || row.from_id} → ${row.to_name || row.to_id}`
+      const fromNum = String(row.from_id)
+      const toNum = String(row.to_id)
+      const fromIsLeft = fromNum === leftId.replace(/^company:/i, '')
+      const fromIsRight = fromNum === rightId.replace(/^company:/i, '')
+      const toIsRight = toNum === rightId.replace(/^company:/i, '')
+      const toIsLeft = toNum === leftId.replace(/^company:/i, '')
+      const fromName = fromIsLeft ? leftLabel : fromIsRight ? rightLabel : (row.from_name || `company:${fromNum}`)
+      const toName = toIsRight ? rightLabel : toIsLeft ? leftLabel : (row.to_name || `company:${toNum}`)
+      const flowLabel = `${fromName} → ${toName}`
       labels[nodeIndex] = `${flowLabel} • ${magnitude.toLocaleString()} movers`
       metaNodes.push({
         id: `${row.from_id}-${row.to_id}`,
@@ -667,10 +1042,13 @@ export default function App(){
     if (!rows.length) {
       throw new Error('No migration flows found for that pair.')
     }
-    const leftName = rows.find((row) => row.from_id === leftId)?.from_name
-      || rows.find((row) => row.to_id === leftId)?.to_name
-    const rightName = rows.find((row) => row.from_id === rightId)?.from_name
-      || rows.find((row) => row.to_id === rightId)?.to_name
+    // Normalize for name lookup: rows carry numeric ids; anchors are canonical `company:<id>`
+    const leftNum = leftId.replace(/^company:/i, '')
+    const rightNum = rightId.replace(/^company:/i, '')
+    const leftName = rows.find((row) => row.from_id === leftNum)?.from_name
+      || rows.find((row) => row.to_id === leftNum)?.to_name
+    const rightName = rows.find((row) => row.from_id === rightNum)?.from_name
+      || rows.find((row) => row.to_id === rightNum)?.to_name
     const tile = buildMigrationTile(leftId, rightId, rows, { leftName, rightName })
     setErr(null)
     setLabels(tile.labels || [])
@@ -798,11 +1176,120 @@ export default function App(){
     }
   }
 
+  const runEdgeDecompositionCommand = async (
+    ridLocal: number,
+    commandText: string,
+    personCanonical: string,
+    pushHistory: boolean,
+  ) => {
+    setEdgeDecompLoading(true)
+    try {
+      const data = await fetchEdgeDecomposition(personCanonical)
+      if (ridLocal !== runIdRef.current) return
+      const view = buildEdgeDecompositionView(data)
+      setEdgeDecompView(view)
+      setEdgeDecompFacet(null)
+      setEdgeDecompMask(null)
+      setIntroPathsResult(null)
+      setIntroPathsTileMask(null)
+      setPeopleSearchMask(null)
+      setConnectionsMask(null)
+      setCompaniesMask(null)
+      setCompareGroups(null)
+      setSidebarIndices(null)
+      setSelectedRegion(null)
+      setNearbyExecs([])
+      setSelectedIndex(null)
+      setMetaNodes(view.metaNodes as any)
+      setLabels(view.labels)
+
+      try {
+        const idsForLookup = view.metaNodes
+          .map((node: any) => String(node?.id ?? node?.person_id ?? ''))
+          .filter((id) => id && /^\d+$/.test(id))
+        let chMap = new Map<string, string>()
+        if (idsForLookup.length) {
+          chMap = await fetchAvatarMap(idsForLookup)
+        }
+        if (ridLocal !== runIdRef.current) return
+        const avatarsNext = new Array(view.tile.count).fill('').map((_, idx) => {
+          const node = view.metaNodes[idx] || {}
+          const explicit = (node as any).avatar_url || (node as any).avatarUrl
+          if (explicit && typeof explicit === 'string') return explicit
+          const keyA = String(node?.id ?? '')
+          const keyB = String((node as any)?.person_id ?? '')
+          if (keyA && chMap.has(keyA)) return chMap.get(keyA) || ''
+          if (keyB && chMap.has(keyB)) return chMap.get(keyB) || ''
+          return ''
+        })
+        setAvatars(avatarsNext)
+      } catch (avatarErr) {
+        console.warn('AvatarMap(edge decomposition) failed', avatarErr)
+        if (ridLocal === runIdRef.current) {
+          setAvatars(new Array(view.tile.count).fill(''))
+        }
+      }
+
+      latestTileRef.current = view.tile as ParsedTile
+      try { (view.tile as any).meta.mode = 'person' } catch {}
+      sceneRef.current?.setForeground(view.tile as any)
+
+      const focusLabel = view.center.name || view.center.canonicalId || personCanonical
+      setFocus(`Edge Decomposition: ${focusLabel}`)
+      setErr(null)
+
+      if (pushHistory) {
+        setHistory((h) => {
+          const nh = [...h.slice(0, cursor + 1), { id: commandText, move: { x: 0, y: 0 }, turn: 0 }]
+          setCursor(nh.length - 1)
+          return nh
+        })
+      }
+    } catch (error: any) {
+      if (ridLocal === runIdRef.current) {
+        clearEdgeDecomposition()
+        setErr(error?.message || 'Edge decomposition failed')
+      }
+    } finally {
+      setEdgeDecompLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!edgeDecompView || !edgeDecompFacet) {
+      if (edgeDecompMask) setEdgeDecompMask(null)
+      return
+    }
+    const mask = new Array(edgeDecompView.tile.count).fill(false)
+    mask[0] = true
+    edgeDecompView.edges.forEach((edge) => {
+      if (edge.facets.includes(edgeDecompFacet)) {
+        mask[edge.source] = true
+        mask[edge.target] = true
+      }
+    })
+    setEdgeDecompMask(mask)
+  }, [edgeDecompView, edgeDecompFacet])
+
   async function run(cmd: string, opts?: RunOptions, evaluation?: EvaluationResult | null){
     const rid = ++runIdRef.current
     const pushHistory = opts?.pushHistory !== false;
     const s = cmd.trim();
     if (!s) return;
+    if (/^edge\s+decomposition/i.test(s)) {
+      const personMatch = s.match(/person\s*:?\s*(\d{3,})/i)
+      const userMatch = s.match(/user\s*:?\s*(\d{3,})/i)
+      const fallbackMatch = s.match(/\b(\d{3,})\b/)
+      const numericId = personMatch?.[1] || userMatch?.[1] || fallbackMatch?.[1]
+      if (!numericId) {
+        setErr('Edge decomposition requires person:<id>')
+        return
+      }
+      const personCanonical = `person:${numericId}`
+      await runEdgeDecompositionCommand(rid, s, personCanonical, pushHistory)
+      return
+    }
+    clearEdgeDecomposition()
     if (s.toLowerCase() === "clear") { sceneRef.current?.clear(); setFocus(null); return; }
     if (/^(demo\s*venn|venn30|compare\s*demo)$/i.test(s)) {
       const demo = buildVennDemoTile30()
@@ -952,6 +1439,7 @@ export default function App(){
           } as any
           ;(tile as any).labels = labelsLocal
           ;(tile as any).meta = { nodes: metaLocal }
+          ;(tile as any).meta.mode = 'person'
           ;(tile as any).focusWorld = { x: 0, y: 0 }
 
           // Avatars
@@ -1054,7 +1542,7 @@ export default function App(){
     setFocus(id);
     // We will push history after we know the move vector actually used
     setErr(null);
-      try {
+    try {
       const { tile } = await loadTileSmart(id)
       // Capture labels for sidebar (if provided by JSON path)
       try { if ((tile as any).labels && Array.isArray((tile as any).labels)) setLabels((tile as any).labels as string[]) } catch {}
@@ -1075,7 +1563,7 @@ export default function App(){
           const m:any = metaNodes?.[i] || {}
           const exp = (m?.avatar_url || m?.avatarUrl) as string | undefined
           if (exp) return exp
-          const idStr = String(m?.id || '')
+          const idStr = String(m?.id ?? m?.person_id ?? '')
           const fromCH = (idStr && chMap.has(idStr)) ? chMap.get(idStr)! : ''
           if (fromCH) return fromCH
           return ''
@@ -1114,7 +1602,7 @@ export default function App(){
           if (p) { setProfile(p); setProfileOpen(true) }
         } else { setProfile(null); setProfileOpen(false) }
       } catch {}
-      } catch (e: any) {
+    } catch (e: any) {
       const step = (e && e.step) || 'unknown'
       const code = (e && e.code) || 'ERR'
       setErr(`Failed at ${step}: ${code} — ${e?.message || "fetch failed"}`);
@@ -1122,6 +1610,33 @@ export default function App(){
   }
 
   // Strict mode: suggestion heuristic removed
+  // Canonicalize an entity id for the currently loaded tile + index (mirrors CanvasScene dblclick)
+  function canonicalIdForIndex(i: number): string | null {
+    try {
+      const t: any = latestTileRef.current as any
+      if (!t || !Array.isArray((t as any)?.meta?.nodes)) return null
+      const meta = (t as any).meta.nodes?.[i] || {}
+      const mode = (t as any)?.meta?.mode as string | undefined
+      const grp = (Array.isArray((t as any)?.group) ? (t as any).group[i] : (t as any)?.group?.[i])
+      const prefer = (keys: string[]) => {
+        for (const k of keys) { const v = meta?.[k]; if (v != null && String(v).trim() !== '') return String(v) }
+        return null
+      }
+      // Choose best raw id
+      let raw: string | null = prefer(['id', 'person_id', 'linkedin_id', 'handle'])
+      if (!raw) return null
+      // Normalize purely numeric ids
+      if (/^\d+$/.test(raw)) {
+        if (mode === 'graph') return (grp === 1) ? `person:${raw}` : `company:${raw}`
+        if (mode === 'company') return `person:${raw}`
+        if (mode === 'person') return `person:${raw}`
+        return `person:${raw}`
+      }
+      // If already canonical like person:123 / company:123
+      if (/^(company|person):\d+$/i.test(raw)) return raw.toLowerCase()
+      return null
+    } catch { return null }
+  }
 
   function intersectCount(a:Set<string>, b:Set<string>){ let k=0; for (const x of a) if (b.has(x)) k++; return k }
   function diffCount(a:Set<string>, b:Set<string>){ let k=0; for (const x of a) if (!b.has(x)) k++; return k }
@@ -1129,8 +1644,14 @@ export default function App(){
   // --- Compare Mode Implementation ---
   function nodeIdFor(tile: any, i: number): string {
     const meta = tile?.meta?.nodes?.[i]
-    const val = meta?.id ?? meta?.linkedin_id ?? meta?.handle ?? tile?.labels?.[i]
-    return String(val ?? i)
+    const raw = meta?.id ?? meta?.person_id ?? meta?.linkedin_id ?? meta?.handle ?? tile?.labels?.[i]
+    const val = String(raw ?? i)
+    const lower = val.toLowerCase()
+    if (/^person:\d+$/i.test(lower)) return lower
+    if (/^company:\d+$/i.test(lower)) return lower
+    if (/^(linkedin|http)/i.test(lower)) return lower
+    if (/^\d+$/.test(lower)) return `person:${lower}`
+    return lower
   }
 
   function nodeLabelFor(tile: any, i: number): string {
@@ -1260,6 +1781,16 @@ export default function App(){
     const bF1_aF2 = Array.from(degB.firstIds).filter(id=>degA.secondIds.has(id) && !degA.firstIds.has(id))
     const aOnly = Array.from(new Set<string>([...degA.firstIds, ...degA.secondIds])).filter(id=>!degB.firstIds.has(id) && !degB.secondIds.has(id))
     const bOnly = Array.from(new Set<string>([...degB.firstIds, ...degB.secondIds])).filter(id=>!degA.firstIds.has(id) && !degA.secondIds.has(id))
+    try {
+      console.log('compare category raw sizes', {
+        mutualF1: mutualF1.length,
+        mutualF2: mutualF2.length,
+        aF1_bF2: aF1_bF2.length,
+        bF1_aF2: bF1_aF2.length,
+        aOnly: aOnly.length,
+        bOnly: bOnly.length,
+      })
+    } catch {}
 
     // Sanity diagnostics: if strict work-only graph is empty, surface a clear message instead of drawing nothing
     const totalCats = degA.first.length + degA.second.length + degB.first.length + degB.second.length
@@ -1339,7 +1870,8 @@ export default function App(){
       const step = n / target
       const out: T[] = []
       for (let k=0;k<target;k++){
-        const idx = Math.min(n-1, Math.floor(k * step))
+      const idx = Math.min(n-1, Math.floor(k * step))
+      if (!out.includes(arr[idx])) out.push(arr[idx])
         out.push(arr[idx])
       }
       return out
@@ -1357,6 +1889,13 @@ export default function App(){
     const alpha: number[] = []
     const labels: string[] = []
     const indexGroups = { left: [] as number[], right: [] as number[], overlap: [] as number[] }
+    const lists = {
+      mutualF1: [] as number[],
+      aF1_bF2: [] as number[],
+      bF1_aF2: [] as number[],
+      aOnly: [] as number[],
+      bOnly: [] as number[],
+    }
     const seenIds = new Set<string>()
 
     // Center nodes for A and B (reserve their ids so no duplicates appear as orange dots)
@@ -1386,10 +1925,15 @@ export default function App(){
     const firstInnerGap = Math.max(28, Math.floor(r1 * 0.18))
     addGroupDet(sampleEven(Array.from(degA.firstIds).filter(id=>!mutualF1.includes(id) && !aF1_bF2.includes(id))), leftCX, baseCY, firstInnerGap, r1, { baseSize:4.6, bgSize:0.8, region:'left', ring:'first', pred:(x,y)=> inLeftFirst(x,y) && !(inRightFirst(x,y) || inRightSecond(x,y)) })
     addGroupDet(sampleEven(Array.from(degB.firstIds).filter(id=>!mutualF1.includes(id) && !bF1_aF2.includes(id))), rightCX, baseCY, firstInnerGap, r1, { baseSize:4.6, bgSize:0.8, region:'right', ring:'first', pred:(x,y)=> inRightFirst(x,y) && !(inLeftFirst(x,y) || inLeftSecond(x,y)) })
-    addGroupDet(sampleEven(mutualF1), midCX, baseCY, firstInnerGap, r1, { baseSize:5.0, bgSize:0.9, region:'overlap', ring:'first', pred:(x,y)=> inLeftFirst(x,y) && inRightFirst(x,y) })
-    // Cross ring (first of A that are second of B) and vice versa → place near mid but biased
-    addGroupDet(sampleEven(aF1_bF2), (leftCX+midCX)/2, baseCY, firstInnerGap, r1, { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross', pred:(x,y)=> inLeftFirst(x,y) && inRightSecond(x,y) && !inRightFirst(x,y) })
-    addGroupDet(sampleEven(bF1_aF2), (rightCX+midCX)/2, baseCY, firstInnerGap, r1, { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross', pred:(x,y)=> inRightFirst(x,y) && inLeftSecond(x,y) && !inLeftFirst(x,y) })
+    const placedMutualF1 = placeDeterministic(mutualF1, midCX, baseCY, Math.max(0, firstInnerGap), r1, (x,y)=> inLeftFirst(x,y) && inRightFirst(x,y), { baseSize:5.0, bgSize:0.9, region:'overlap', ring:'first' })
+    for (const idx of placedMutualF1) { indexGroups.overlap.push(idx); lists.mutualF1.push(idx) }
+    const placedAF1B2 = placeDeterministic(aF1_bF2, (leftCX+midCX)/2, baseCY, Math.max(0, firstInnerGap), r1, (x,y)=> inLeftFirst(x,y) && inRightSecond(x,y) && !inRightFirst(x,y), { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross' })
+    for (const idx of placedAF1B2) { indexGroups.overlap.push(idx); lists.aF1_bF2.push(idx) }
+    const placedBF1A2 = placeDeterministic(bF1_aF2, (rightCX+midCX)/2, baseCY, Math.max(0, firstInnerGap), r1, (x,y)=> inRightFirst(x,y) && inLeftSecond(x,y) && !inLeftFirst(x,y), { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross' })
+    for (const idx of placedBF1A2) { indexGroups.overlap.push(idx); lists.bF1_aF2.push(idx) }
+    lists.mutualF1Raw = mutualF1
+    lists.aF1_bF2Raw = aF1_bF2
+    lists.bF1_aF2Raw = bF1_aF2
 
     // Second-degree
     addGroupDet(sampleEven(Array.from(degA.secondIds).filter(id=>!mutualF2.includes(id))), leftCX, baseCY, r1, r2, { baseSize:3.4, bgSize:0.7, region:'left', ring:'second', pred:(x,y)=> inLeftSecond(x,y) && !(inRightFirst(x,y) || inRightSecond(x,y)) })
@@ -1398,8 +1942,10 @@ export default function App(){
 
     // Non-overlapping pools (optional, already covered above as A-only/B-only across rings)
     // Use small jitter around outer radius
-    addGroupDet(sampleEven(aOnly), leftCX-40, baseCY, r2+10, r2+80, { baseSize:3.8, bgSize:1.6, region:'left', ring:'second' as any })
-    addGroupDet(sampleEven(bOnly), rightCX+40, baseCY, r2+10, r2+80, { baseSize:3.8, bgSize:1.6, region:'right', ring:'second' as any })
+    const placedAOnly = placeDeterministic(aOnly, leftCX-40, baseCY, r2+10, r2+80, ()=> true, { baseSize:3.8, bgSize:1.6, region:'left', ring:'second' as any })
+    for (const idx of placedAOnly) { indexGroups.left.push(idx); lists.aOnly.push(idx) }
+    const placedBOnly = placeDeterministic(bOnly, rightCX+40, baseCY, r2+10, r2+80, ()=> true, { baseSize:3.8, bgSize:1.6, region:'right', ring:'second' as any })
+    for (const idx of placedBOnly) { indexGroups.right.push(idx); lists.bOnly.push(idx) }
 
     const out: ParsedTile = {
       count: nodes.length/2,
@@ -1411,6 +1957,7 @@ export default function App(){
     } as any
     ;(out as any).labels = labels
     ;(out as any).compareIndexGroups = indexGroups
+    ;(out as any).compareLists = lists
     ;(out as any).compareOverlay = {
       // regions carry both radii for overlay renderer
       regions: {
@@ -1530,7 +2077,8 @@ export default function App(){
     const onKey = (e: KeyboardEvent)=>{
       const active = document.activeElement as HTMLElement | null
       const isTyping = !!(active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || (active as any)?.isContentEditable))
-      if (e.key === '1') { setProfileOpen(v=>!v); return }
+      const tileMode = (()=>{ try { return (latestTileRef.current as any)?.meta?.mode || null } catch { return null } })()
+      // remove: '1' key profile HUD toggle
       if (e.key === 'ArrowDown' && typeof selectedIndex === 'number') setSelectedIndex((prev)=>{
         const cur = (typeof prev === 'number' ? prev : 0)
         return (cur + 1) % metaNodes.length
@@ -1539,22 +2087,35 @@ export default function App(){
         const cur = (typeof prev === 'number' ? prev : 0)
         return (cur - 1 + metaNodes.length) % metaNodes.length
       })
-      // Move focus to next node with Left Arrow (was Right Arrow)
-      if (e.key === 'ArrowLeft' && typeof selectedIndex === 'number') {
+      // Company mode: Left Arrow spawns selected person's ego (quick handoff)
+      if (e.key === 'ArrowLeft') {
+        if (tileMode === 'company') {
+          if (isTyping) return
+          if (typeof selectedIndex !== 'number' || selectedIndex < 0) return
+          const idCanon = canonicalIdForIndex(selectedIndex)
+          if (!idCanon || !/^person:\d+$/i.test(idCanon)) return
+          // Skip if center (company) is selected
+          if (selectedIndex === 0) return
+          run(`show ${idCanon}`)
+          const radians = (Math.random() > 0.5 ? 1 : -1) * (Math.PI/2)
+          window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians } }))
+          return
+        } else if (typeof selectedIndex === 'number') {
+          // Default behavior: move focus to next node
         setSelectedIndex((prev)=>{
           const next = ((typeof prev === 'number' ? prev : 0) + 1) % metaNodes.length
           ;(sceneRef.current as any)?.focusIndex?.(next, { zoom: 0.9 })
           return next
         })
+        }
       }
       // Spawn selected person's graph with Right Arrow (was Left Arrow)
       if (e.key === 'ArrowRight') {
         if (isTyping) return
         if (typeof selectedIndex !== 'number' || selectedIndex < 0) return
-        const sel = metaNodes?.[selectedIndex]
-        if (!sel || sel.id == null) return
-        const id = String(sel.id)
-        run(`show person:${id}`)
+        const idCanon = canonicalIdForIndex(selectedIndex)
+        if (!idCanon || !/^person:\d+$/i.test(idCanon)) return
+        run(`show ${idCanon}`)
         const radians = (Math.random() > 0.5 ? 1 : -1) * (Math.PI/2)
         window.dispatchEvent(new CustomEvent('graph_turn', { detail: { radians } }))
         return
@@ -1573,6 +2134,10 @@ export default function App(){
           run(prev.id, { pushHistory: false, overrideMove: { x: -(cur?.move?.x||0), y: -(cur?.move?.y||0) } })
         }
         return
+      }
+      // ESC: close Top Paths / Nearby panel if open
+      if (e.key === 'Escape') {
+        if (introPathsResult) { clearIntroPanels(); return }
       }
       // Delete key: promote previously dimmed graph to foreground (no duplication)
       if ((e.key === 'Delete' || e.key === 'Del') && !isTyping) {
@@ -1604,44 +2169,382 @@ export default function App(){
           concentric={concentric}
           selectedIndex={selectedIndex}
           visibleMask={visibleMask}
+          maskMode={maskMode}
+          degreeHighlight={degreeHighlight}
+          onUnselect={()=> setSelectedIndex(null)}
+          onPick={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate:true, ms:520, zoomMultiplier: 6 }); }}
+          onClear={()=>{ sceneRef.current?.clear(); setFocus(null); }}
+          onStats={(_,count)=>{ setNodeCount(count) }}
+          onRegionClick={onRegionClick}
+        />
+      ) : rendererMode === 'cosmograph' ? (
+        <CosmoScene
+          ref={handleSceneRef}
+          concentric={concentric}
+          selectedIndex={selectedIndex}
+          visibleMask={visibleMask}
+          maskMode={maskMode}
+          onUnselect={()=> setSelectedIndex(null)}
           onPick={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate:true, ms:520, zoomMultiplier: 6 }); }}
           onClear={()=>{ sceneRef.current?.clear(); setFocus(null); }}
           onStats={(_,count)=>{ setNodeCount(count) }}
           onRegionClick={onRegionClick}
         />
       ) : (
-        <CosmoScene
+        <GpuScene
           ref={handleSceneRef}
           concentric={concentric}
           selectedIndex={selectedIndex}
           visibleMask={visibleMask}
+          maskMode={maskMode}
+          degreeHighlight={degreeHighlight}
+          onUnselect={()=> setSelectedIndex(null)}
           onPick={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate:true, ms:520, zoomMultiplier: 6 }); }}
           onClear={()=>{ sceneRef.current?.clear(); setFocus(null); }}
           onStats={(_,count)=>{ setNodeCount(count) }}
           onRegionClick={onRegionClick}
         />
       )}
-      <div style={{ position:'absolute', top:16, right:24, zIndex:30, display:'flex', gap:8 }}>
-        <button
-          onClick={()=> setRendererMode(mode => mode === 'canvas' ? 'cosmograph' : 'canvas')}
-          style={{ padding:'6px 12px', borderRadius:8, border:'1px solid var(--dt-border)', background:'var(--dt-fill-med)', color:'var(--dt-text)', fontSize:13 }}
+
+      {edgeDecompView && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 16,
+            left: 16,
+            zIndex: 32,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+            maxWidth: 420,
+          }}
         >
-          Renderer: {rendererMode === 'canvas' ? 'Canvas' : 'Cosmograph'} (switch)
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              background: 'var(--dt-bg-elev-2)',
+              border: '1px solid var(--dt-border)',
+              borderRadius: 12,
+              padding: '10px 12px',
+              boxShadow: '0 10px 28px rgba(0,0,0,0.35)',
+            }}
+          >
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: 0.15 }}>Edge Decomposition</div>
+              <div style={{ fontSize: 12, opacity: 0.75, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {edgeDecompView.center.name || edgeDecompView.center.canonicalId || `person:${edgeDecompView.center.id}`}
+              </div>
+              {edgeDecompView.center.company && (
+                <div style={{ fontSize: 11, opacity: 0.6, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {edgeDecompView.center.company}
+                </div>
+              )}
+            </div>
+        <button
+              className="no-drag"
+              onClick={clearEdgeDecomposition}
+              style={{
+                padding: '6px 10px',
+                fontSize: 12,
+                borderRadius: 8,
+                border: '1px solid var(--dt-border)',
+                background: 'var(--dt-fill-weak)',
+                color: 'var(--dt-text)',
+                cursor: 'pointer',
+              }}
+            >
+              Close
         </button>
       </div>
-      <Sidebar 
-        open={sidebarOpen} 
-        onToggle={()=>setSidebarOpen(!sidebarOpen)} 
-        items={(sidebarIndices ? sidebarIndices : Array.from({length: Math.max(0,nodeCount)},(_,i)=>i)).map((i)=>({ index:i, group:(i%8), name: labels[i], title: (metaNodes[i] as any)?.title || (metaNodes[i] as any)?.job_title || (metaNodes[i] as any)?.headline || (metaNodes[i] as any)?.role || (metaNodes[i] as any)?.position || null, avatarUrl: avatars[i] }))}
-        selectedIndex={selectedIndex}
-        onSelect={(i)=>{ setSelectedIndex(i); }} 
-        onDoubleSelect={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate: true, ms: 520, zoomMultiplier: 8 }); setSidebarOpen(false); }} 
-      />
+
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <button
+              className="no-drag"
+              onClick={() => setEdgeDecompFacet(null)}
+              style={{
+                padding: '6px 12px',
+                borderRadius: 999,
+                border: '1px solid var(--dt-border)',
+                background: edgeDecompFacet === null ? 'var(--dt-fill-med)' : 'rgba(0,0,0,0.55)',
+                color: edgeDecompFacet === null ? 'var(--dt-text)' : 'rgba(255,255,255,0.6)',
+                fontSize: 12,
+                cursor: 'pointer',
+              }}
+            >
+              All
+            </button>
+            {edgeDecompView.facets.map((facet) => {
+              const active = edgeDecompFacet === facet.key
+              const color = facet.color || '#60a5fa'
+              return (
+                <button
+                  key={facet.key}
+                  className="no-drag"
+                  onClick={() => setEdgeDecompFacet(active ? null : facet.key)}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: 999,
+                    border: `1px solid ${color}`,
+                    background: active ? color : 'rgba(0,0,0,0.65)',
+                    color: active ? '#050505' : color,
+                    fontSize: 12,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    gap: 6,
+                    alignItems: 'center',
+                  }}
+                >
+                  <span>{facet.label}</span>
+                  <span style={{ fontSize: 11, opacity: active ? 0.75 : 0.8 }}>{facet.count}</span>
+                </button>
+              )
+            })}
+          </div>
+
+          <div
+            style={{
+              background: 'var(--dt-bg-elev-2)',
+              border: '1px solid var(--dt-border)',
+              borderRadius: 12,
+              padding: '10px 12px',
+              boxShadow: '0 8px 18px rgba(0,0,0,0.32)',
+              maxHeight: 220,
+              overflowY: 'auto',
+            }}
+          >
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, letterSpacing: 0.15 }}>Top connections</div>
+            <div style={{ display: 'grid', gap: 6 }}>
+              {edgeDecompView.neighbors.length === 0 && (
+                <div style={{ fontSize: 11, opacity: 0.68 }}>
+                  No overlapping stints (≥90 days) found for this person.
+                </div>
+              )}
+              {edgeDecompView.neighbors.slice(0, 6).map((neighbor) => {
+                const months = neighbor.overlapDays ? Math.round(neighbor.overlapDays / 30) : 0
+                return (
+                  <button
+                    key={`${neighbor.id}-${neighbor.index}`}
+                    className="no-drag"
+                    onClick={() => {
+                      setSelectedIndex(neighbor.index)
+                      try { (sceneRef.current as any)?.focusIndex?.(neighbor.index, { animate: true, ms: 520, zoomMultiplier: 7 }) } catch {}
+                    }}
+                    style={{
+                      textAlign: 'left',
+                      border: '1px solid var(--dt-border)',
+                      borderRadius: 10,
+                      background: 'rgba(0,0,0,0.55)',
+                      padding: '8px 10px',
+                      fontSize: 12,
+                      color: 'var(--dt-text)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {neighbor.name || neighbor.company || neighbor.id}
+                    </div>
+                    <div style={{ fontSize: 11, opacity: 0.7, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {neighbor.title || neighbor.company || '—'}
+                    </div>
+                    <div style={{ fontSize: 11, marginTop: 4, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <span style={{ opacity: 0.75 }}>{months}m shared</span>
+                      {neighbor.facets.slice(0, 2).map((facet) => (
+                        <span key={facet} style={{ opacity: 0.65 }}>{facet}</span>
+                      ))}
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {edgeDecompLoading && !edgeDecompView && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 20,
+            left: 20,
+            zIndex: 32,
+            padding: '6px 10px',
+            borderRadius: 8,
+            border: '1px solid var(--dt-border)',
+            background: 'rgba(0,0,0,0.65)',
+            color: 'var(--dt-text)',
+            fontSize: 12,
+          }}
+        >
+          Loading edge decomposition…
+        </div>
+      )}
+
+      {/* Controls moved into SideDrawer > Settings */}
+      {(()=>{
+        // SideDrawer scaffolding: tabs and pluggable content. For now, keep a "Nodes" tab
+        const items = (sidebarIndices ? sidebarIndices : Array.from({length: Math.max(0,nodeCount)},(_,i)=>i))
+          .map((i)=>({
+            index:i,
+            group:(i%8),
+            name: labels[i],
+            title: (metaNodes[i] as any)?.title || (metaNodes[i] as any)?.job_title || (metaNodes[i] as any)?.headline || (metaNodes[i] as any)?.role || (metaNodes[i] as any)?.position || null,
+            avatarUrl: avatars[i]
+          }))
+        const getScene = ()=> sceneRef.current
+        const getTile = ()=> latestTileRef.current
+        const lastCommand = (()=>{ try{ return history.length ? history[cursor]?.id || history[history.length-1]?.id || null : null } catch { return null } })()
+        const tabs = [
+          { id:'overview', label:'Overview', render: ()=> (
+            <div>
+              <div style={{ fontSize:13, marginBottom:8, color:'var(--dt-text-dim)' }}>Overview</div>
+              <div style={{ fontSize:11, color:'var(--dt-text-dim)', marginBottom:8 }}>Compare overview: {compareGroups ? 'compareGroups set' : 'compareGroups null'} | lists {compareLists ? 'present' : 'null'}</div>
+              {(() => {
+                const comp: any = latestTileRef.current as any
+                const cg = compareGroups || (comp && comp.compareIndexGroups) || null
+                const lists = compareLists || comp?.compareLists || null
+                if (cg && lists) {
+                  return (
+                    <div>
+                      <div style={{ fontSize:11, color:'var(--dt-text-dim)', marginBottom:6 }}>Debug · shared:{lists.mutualF1.length} a1∩b2:{lists.aF1_bF2.length} a2∩b1:{lists.bF1_aF2.length} a-only:{lists.aOnly.length} b-only:{lists.bOnly.length}</div>
+                      <CompareLists
+                        labels={labels}
+                        metaNodes={metaNodes as any}
+                        groups={{ ...(cg as any), lists: lists as any }}
+                        onFocusIndex={(i)=> setSelectedIndex(i)}
+                      />
+                    </div>
+                  )
+                }
+                return <div style={{ fontSize:12, color:'var(--dt-text-dim)', padding:'8px 0' }}>No compare breakdown yet. Run compare A + B.</div>
+              })()}
+            </div>
+          ), disabled: false },
+          { id:'connections', label:'Connections', badge: (function(){
+              try {
+                const t:any = (latestTileRef.current as any)
+                if (!t || (t?.meta?.mode !== 'person')) return undefined
+                // rough count from current sliders via TabConnections callback memo
+                const el = document.getElementById('connections-badge-proxy') as any
+                const v = el && el.getAttribute ? el.getAttribute('data-count') : null
+                return v ? Number(v) : undefined
+              } catch { return undefined }
+            })(), render: ()=> (
+            <div>
+              <div style={{ fontSize:13, marginBottom:8, color:'var(--dt-text-dim)', letterSpacing:0.2 }}>1st/2nd Degree</div>
+              <TabConnections
+                labels={labels}
+                metaNodes={metaNodes as any}
+                getTile={()=> latestTileRef.current}
+                onMask={(mask)=> setConnectionsMask(mask)}
+                onFocusIndex={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate:true, ms:520, zoomMultiplier: 8 }); }}
+                onSetMaskMode={(m)=> setMaskMode(m)}
+                onSetDegreeHighlight={(d)=> setDegreeHighlight(d)}
+                onCountsChange={(f,s)=>{
+                  try {
+                    let el = document.getElementById('connections-badge-proxy')
+                    if (!el) {
+                      el = document.createElement('div')
+                      el.id = 'connections-badge-proxy'
+                      el.style.display = 'none'
+                      document.body.appendChild(el)
+                    }
+                    el.setAttribute('data-count', String( (Number(f||0) + Number(s||0)) ))
+                  } catch {}
+                }}
+              />
+            </div>
+          ), disabled: false },
+          { id:'search', label:'Search', render: ()=> (
+            <div>
+              <div style={{ fontSize:13, marginBottom:8, color:'var(--dt-text-dim)', letterSpacing:0.2 }}>People Search</div>
+              <TabPeople
+                labels={labels}
+                metaNodes={metaNodes as any}
+                onMask={(mask)=> setPeopleSearchMask(mask)}
+                onSetMaskMode={(m)=> setMaskMode(m)}
+                onFocusIndex={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate: true, ms: 520, zoomMultiplier: 8 }); }}
+              />
+            </div>
+          ), disabled: false },
+          { id:'companies', label:'Companies', render: ()=> (
+            <div>
+              <div style={{ fontSize:13, marginBottom:8, color:'var(--dt-text-dim)', letterSpacing:0.2 }}>Membership Companies</div>
+              <TabCompanies
+                labels={labels}
+                metaNodes={metaNodes as any}
+                onMask={(mask)=> setCompaniesMask(mask)}
+                onFocusIndex={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate: true, ms: 520, zoomMultiplier: 8 }); }}
+                onSetMaskMode={(m)=> setMaskMode(m)}
+              />
+            </div>
+          ), disabled: false },
+          { id:'paths', label:'Paths', render: ()=> (
+            <div style={{ color:'var(--dt-text-dim)', fontSize:13 }}>Intro paths controls coming soon.</div>
+          ), disabled: false },
+          { id:'compare', label:'Compare', render: ()=> (
+            <div style={{ color:'var(--dt-text-dim)', fontSize:13 }}>Compare groups browser coming soon.</div>
+          ), disabled: false },
+          { id:'settings', label:'Settings', render: ()=> (
+            <div style={{ display:'grid', gap:12 }}>
+              <div>
+                <div style={{ fontSize:12, color:'var(--dt-text-dim)', marginBottom:4 }}>Renderer</div>
+                <div style={{ display:'flex', gap:6 }}>
+                  <button onClick={()=> setRendererMode('canvas')} style={{ padding:'6px 10px', fontSize:12, border:'1px solid var(--dt-border)', borderRadius:6, background: rendererMode==='canvas' ? 'var(--dt-fill-strong)' : 'var(--dt-fill-weak)', color:'var(--dt-text)' }}>Canvas</button>
+                  <button onClick={()=> setRendererMode('cosmograph')} style={{ padding:'6px 10px', fontSize:12, border:'1px solid var(--dt-border)', borderRadius:6, background: rendererMode==='cosmograph' ? 'var(--dt-fill-strong)' : 'var(--dt-fill-weak)', color:'var(--dt-text)' }}>Cosmograph</button>
+                  <button onClick={()=> setRendererMode('gpu')} style={{ padding:'6px 10px', fontSize:12, border:'1px solid var(--dt-border)', borderRadius:6, background: rendererMode==='gpu' ? 'var(--dt-fill-strong)' : 'var(--dt-fill-weak)', color:'var(--dt-text)' }}>GPU</button>
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize:12, color:'var(--dt-text-dim)', marginBottom:4 }}>Mask Mode</div>
+                <div style={{ display:'flex', gap:6 }}>
+                  <button onClick={()=> setMaskMode('hide')} style={{ padding:'6px 10px', fontSize:12, border:'1px solid var(--dt-border)', borderRadius:6, background: maskMode==='hide' ? 'var(--dt-fill-strong)' : 'var(--dt-fill-weak)', color:'var(--dt-text)' }}>Hide</button>
+                  <button onClick={()=> setMaskMode('dim')} style={{ padding:'6px 10px', fontSize:12, border:'1px solid var(--dt-border)', borderRadius:6, background: maskMode==='dim' ? 'var(--dt-fill-strong)' : 'var(--dt-fill-weak)', color:'var(--dt-text)' }}>Dim</button>
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize:12, color:'var(--dt-text-dim)', marginBottom:4 }}>Canvas UI</div>
+                <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:12 }}>
+                  <input type="checkbox" checked={showFeaturePanel} onChange={(e)=> setShowFeaturePanel(e.target.checked)} />
+                  <span>Show feature panel</span>
+                </label>
+              </div>
+            </div>
+          ), disabled: false },
+          { id:'nodes', label:'Nodes', badge: items.length, render: ()=> (
+            <div>
+              <div style={{ fontSize:13, marginBottom:8, color:'var(--dt-text-dim)', letterSpacing:0.2 }}>Nodes</div>
+              <NodeList
+                items={items}
+                selectedIndex={selectedIndex ?? undefined}
+                onSelect={(i)=> setSelectedIndex(i)}
+                onDoubleSelect={(i)=>{ setSelectedIndex(i); (sceneRef.current as any)?.focusIndex?.(i, { animate: true, ms: 520, zoomMultiplier: 8 }); }}
+              />
+            </div>
+          ) }
+        ]
+
+        return (
+          <SideDrawer
+            open={sidebarOpen}
+            onToggle={()=> setSidebarOpen(!sidebarOpen)}
+            activeTab={activeDrawerTab}
+            onTabChange={setActiveDrawerTab}
+            tabs={tabs as any}
+          />
+        )
+      })()}
       {/* Intro Paths: Top-3 list + Nearby panel */}
       {introPathsResult && (
         <div style={{ position:'absolute', left:12, top:56, zIndex:22, display:'flex', gap:12 }}>
           <div style={{ minWidth:280, background:'var(--dt-bg-elev-1)', border:'1px solid var(--dt-border)', borderRadius:10, padding:10 }}>
-            <div style={{ fontSize:14, fontWeight:700, marginBottom:8 }}>Top Paths</div>
+            <div style={{ display:'flex', alignItems:'center', marginBottom:8 }}>
+              <div style={{ fontSize:14, fontWeight:700, flex:1 }}>Top Paths</div>
+              <button onClick={clearIntroPanels}
+                      title="Close"
+                      style={{ padding:'4px 8px', fontSize:12, border:'1px solid var(--dt-border)', borderRadius:6, background:'var(--dt-fill-weak)', color:'var(--dt-text)' }}>Close</button>
+            </div>
             <div style={{ display:'grid', gap:6 }}>
               {introPathsResult.top3.map((p, idx)=>{
                 const active = selectedPathIndex === idx
@@ -1691,12 +2594,11 @@ export default function App(){
           )}
         </div>
       )}
-      <HUD profile={profile} profileOpen={profileOpen} />
+      {/* profile HUD disabled */}
       <CommandBar
         onRun={(expression, evaluation)=> run(expression, undefined, evaluation)}
         focus={focus}
         selectedIndex={selectedIndex}
-        onSettings={()=>setShowSettings(true)}
       />
       {/* HUD is now replaced by inline controls within CommandBar */}
       {/* demo buttons removed */}
@@ -1705,10 +2607,10 @@ export default function App(){
           {err}
         </div>
       )}
-      {showSettings && (
-        <Settings apiBase={apiBase} bearer={bearer} onSave={({apiBase,bearer})=>{ setApiBase(apiBase); setBearer(bearer); setApiConfig(apiBase,bearer); setShowSettings(false); }} onClose={()=>setShowSettings(false)} />
-      )}
+      {/* Settings modal removed; API server is configured via env/query/localStorage */}
       {/* demo modals removed */}
+
+      {/* In-app overlay for the Next.js demo (no popup) */}
     </div>
   );
 }

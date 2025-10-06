@@ -1,5 +1,4 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
-import AnimatedNetworkBubbles from '../ui/AnimatedNetworkBubbles'
 import type { ParsedTile } from './parse'
 import type { GraphSceneHandle, GraphSceneProps, WorldBounds } from './types'
 import { EDGE_STROKE_BASE, EDGE_STROKE_MAX, MONTHS_NORMALIZER } from '../lib/constants'
@@ -40,8 +39,7 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
   const nodesRef = useRef([] as Node[])
   const visibleMaskRef = useRef(null as boolean[] | null)
   const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 } as { width: number, height: number, dpr?: number })
-  const [showTestToast, setShowTestToast] = useState<string | null>(null)
-  const [showBubbles, setShowBubbles] = useState(false)
+  
   const [highlightDegree, setHighlightDegree] = useState<'all'|'first'|'second'>('all')
   const draggingNodeRef = useRef(null as Node | null)
   const dragLastRef = useRef<{ x: number, y: number } | null>(null)
@@ -661,6 +659,7 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
     const world = screenToWorld(sx, sy)
     for (let i = nodes.length - 1; i >= 0; i--) {
       const vm = visibleMaskRef.current
+      // Hit-testing: always ignore masked-out nodes (both hide and dim modes)
       if (vm && vm.length === nodes.length && !vm[i]) continue
       const node = nodes[i]
       const dx = world.x - node.x
@@ -691,7 +690,7 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
         ctx.restore()
       }
 
-      function drawEdge(ctx: CanvasRenderingContext2D, edge: Edge) {
+      function drawEdge(ctx: CanvasRenderingContext2D, edge: Edge, style?: { stroke?: string, width?: number, alphaMul?: number }) {
         const sourceNode = nodes[edge.source]
         const targetNode = nodes[edge.target]
         if (!sourceNode || !targetNode || Number.isNaN(sourceNode.x) || Number.isNaN(targetNode.x)) return
@@ -710,6 +709,12 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
           const isCenterEdge = (edge.source === 0 || edge.target === 0)
           if (isCenterEdge) deg = 'first'
           else deg = 'second'
+        }
+
+        // If highlighting a specific degree, skip others entirely
+        const effHighlight = (props.degreeHighlight || highlightDegree)
+        if (isPersonMode && effHighlight !== 'all' && effHighlight !== deg) {
+          return
         }
 
         // Base stroke color by mode
@@ -731,20 +736,12 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
         const max = EDGE_STROKE_MAX * (bridgeLink ? 1.0 : 0.64)
         const weight = Math.max(base, Math.min(max, base + scaled * max))
 
-        // Degree highlight toggle: dim non-selected degree
-        if (isPersonMode && highlightDegree !== 'all') {
-          const active = highlightDegree === deg
-          const dim = active ? 1.0 : 0.26
-          const c = stroke.replace(/rgba\(([^)]+)\)/, (_m, inner) => {
-            const parts = inner.split(',').map(s=>s.trim())
-            const a = parseFloat(parts[3] || '1')
-            return `rgba(${parts[0]}, ${parts[1]}, ${parts[2]}, ${Math.max(0, Math.min(1, a * dim))})`
-          })
-          ctx.strokeStyle = c
-        } else {
-          ctx.strokeStyle = stroke
+        // Optional style overrides
+        if (style?.alphaMul && Number.isFinite(style.alphaMul)) {
+          ctx.save(); ctx.globalAlpha *= Math.max(0, Math.min(5, style.alphaMul || 1))
         }
-        ctx.lineWidth = weight
+        ctx.strokeStyle = style?.stroke || stroke
+        ctx.lineWidth = style?.width || weight
         ctx.beginPath()
         ctx.moveTo(A.x, A.y)
         const mx = (A.x + B.x) / 2
@@ -760,6 +757,7 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
         const ny = (dy / len) * (amplitude + wobble) * sign
         ctx.quadraticCurveTo(mx + nx, my + ny, B.x, B.y)
         ctx.stroke()
+        if (style?.alphaMul && Number.isFinite(style.alphaMul)) { ctx.restore() }
       }
 
       function drawScorePill(ctx: CanvasRenderingContext2D, text: string, x:number, y:number){
@@ -996,13 +994,23 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
     if (edges && edges.length > 0) {
       // Optionally thin out when zoomed far out for performance/clarity
       const step = scale < 0.9 && edges.length > 2000 ? Math.ceil(edges.length / 2000) : 1
+      const mode = props.maskMode || 'hide'
       for (let i = 0; i < edges.length; i += step) {
         const e = edges[i]
         const vm = visibleMaskRef.current
+        let draw = true
+        let dim = false
         if (vm && vm.length === nodes.length) {
-          if (!vm[e.source] || !vm[e.target]) continue
+          const sVis = !!vm[e.source]
+          const tVis = !!vm[e.target]
+          if (mode === 'hide') { if (!sVis || !tVis) draw = false }
+          else if (mode === 'dim') { if (!sVis || !tVis) dim = true }
         }
+        if (!draw) continue
+        // Temporarily reduce global alpha for dimmed edges
+        if (dim) { ctx.save(); ctx.globalAlpha *= 0.22 }
         drawEdge(ctx, e)
+        if (dim) ctx.restore()
       }
     }
     
@@ -1052,9 +1060,13 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       }
       return prev
     })()
+    const modeNodes = props.maskMode || 'hide'
     for (let i = 0; i < nodes.length; i++) {
       const vm = visibleMaskRef.current
-      if (vm && vm.length === nodes.length && !vm[i]) continue
+      const maskedOut = vm && vm.length === nodes.length && !vm[i]
+      const hidden = maskedOut && modeNodes !== 'dim'
+      const dimmed = maskedOut && modeNodes === 'dim'
+      if (hidden) continue
       const node = nodes[i]
       const screen = worldToScreen(node.x, node.y)
       // Constant-size nodes: use computeNodeRadius (ignores scale)
@@ -1070,6 +1082,7 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       
     // Draw node with clean styling — add labels for middle (bridges)
       ctx.save()
+      if (dimmed) { try { ctx.globalAlpha *= 0.28 } catch {} }
       let fill = `rgba(255, 165, 0, 0.9)`
       let glow = `rgba(255, 165, 0, 0.3)`
       let border = `rgba(255, 140, 0, 1.0)`
@@ -1182,7 +1195,8 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
           // Draw label
           const centerX = screen.x
           const centerY = screen.y - renderR - 12
-          drawLabel(ctx, labelsRef.current[i], centerX, centerY)
+          if (dimmed) { ctx.save(); ctx.globalAlpha *= 0.35; drawLabel(ctx, labelsRef.current[i], centerX, centerY); ctx.restore() }
+          else { drawLabel(ctx, labelsRef.current[i], centerX, centerY) }
           // Record hitbox for click handling
           try {
             const pad = 4
@@ -1199,6 +1213,18 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
     
     ctx.restore()
     
+    // Selected-node overlay: draw its incident edges on top for visibility
+    try {
+      const si = typeof props.selectedIndex === 'number' ? props.selectedIndex : -1
+      if (si >= 0 && edges && edges.length > 0) {
+        const style = { stroke: 'rgba(255, 236, 160, 0.95)', width: 3.0, alphaMul: 1.0 }
+        for (let i=0;i<edges.length;i++){
+          const e = edges[i]
+          if (e.source === si || e.target === si) drawEdge(ctx, e, style)
+        }
+      }
+    } catch {}
+
     // Report stats
     if (props.onStats) {
       props.onStats(60, nodes.length) // Assume 60fps for canvas
@@ -1398,6 +1424,13 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
         setTy(0)
         setScale(100)
       } else if (e.key === 'Escape') {
+        // First press: unselect if a selection exists
+        const hasSelection = typeof props.selectedIndex === 'number' && (props.selectedIndex as number) >= 0
+        if (hasSelection) {
+          try { (props.onUnselect as any)?.() } catch {}
+          return
+        }
+        // Second press (or no selection): clear as before
         if (tileRef.current) {
           if (props.onClear) props.onClear();
         } else if (trailRef.current.length > 0) {
@@ -1443,33 +1476,20 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       />
       {/* Simple overlay UI on the canvas */}
       <div style={{ position:'absolute', bottom:118, left:14, right:14, zIndex: 21, display:'flex', flexDirection:'row', flexWrap:'wrap', gap:6, alignItems:'center' }}>
-        <button
-          onClick={()=>{ setShowBubbles((v: boolean)=>!v); setShowTestToast('Button pressed!'); setTimeout(()=> setShowTestToast(null), 900) }}
-          style={{ padding:'4px 8px', borderRadius:8, background:'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', backdropFilter:'blur(4px)', fontSize:12 }}
-        >
-          {showBubbles ? 'Hide' : 'Show'} Feature
-        </button>
         {isPersonMode && (
           <div style={{ display:'flex', gap:6, alignItems:'center' }}>
             <span style={{ color:'#aaa', fontSize:12 }}>Highlight:</span>
-            <button onClick={()=> setHighlightDegree('all')} style={{ padding:'4px 8px', borderRadius:8, background: highlightDegree==='all'?'rgba(120,180,255,0.22)':'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', fontSize:12 }}>All</button>
-            <button onClick={()=> setHighlightDegree('first')} style={{ padding:'4px 8px', borderRadius:8, background: highlightDegree==='first'?'rgba(120,180,255,0.22)':'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', fontSize:12 }}>1st</button>
-            <button onClick={()=> setHighlightDegree('second')} style={{ padding:'4px 8px', borderRadius:8, background: highlightDegree==='second'?'rgba(255,170,110,0.22)':'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', fontSize:12 }}>2nd</button>
-          </div>
-        )}
-        {showTestToast && (
-          <div style={{ padding:'4px 6px', borderRadius:8, background:'rgba(10,10,20,0.70)', color:'#d5ffd5', border:'1px solid rgba(120,255,180,0.35)', fontSize:12 }}>
-            {showTestToast}
+            {(()=>{ const eff = (props.degreeHighlight || highlightDegree); return (
+              <>
+                <button onClick={()=> setHighlightDegree('all')} style={{ padding:'4px 8px', borderRadius:8, background: eff==='all'?'rgba(120,180,255,0.22)':'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', fontSize:12 }}>All</button>
+                <button onClick={()=> setHighlightDegree('first')} style={{ padding:'4px 8px', borderRadius:8, background: eff==='first'?'rgba(120,180,255,0.22)':'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', fontSize:12 }}>1st</button>
+                <button onClick={()=> setHighlightDegree('second')} style={{ padding:'4px 8px', borderRadius:8, background: eff==='second'?'rgba(255,170,110,0.22)':'rgba(255,255,255,0.10)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', fontSize:12 }}>2nd</button>
+              </>
+            )})()}
           </div>
         )}
       </div>
-      {showBubbles && (
-        <div style={{ position:'absolute', inset:0, zIndex: 1, overflow:'hidden', pointerEvents:'none' }}>
-          <div style={{ position:'absolute', left:0, top:0, right:0, bottom:0 }}>
-            <AnimatedNetworkBubbles />
-          </div>
-        </div>
-      )}
+      
     </div>
   )
 })

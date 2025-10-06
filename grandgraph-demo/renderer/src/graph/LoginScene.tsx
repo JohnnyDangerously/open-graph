@@ -15,9 +15,9 @@ type MegaConfig = {
   spokeFraction?: number; // 0..1 of particles biased along great-circle spokes
 };
 
-type Props = { onDone?: () => void; onConnect?: () => void; config?: MegaConfig; dense?: boolean; palette?: 'default' | 'random' | 'whiteBlue' | 'allWhite' | 'whiteBluePurple'; brightness?: number; showEdges?: boolean; edgeMultiplier?: number; fourCores?: boolean; asBackground?: boolean; syncKey?: string; nodeScale?: number; edgeFraction?: number; edgeAlpha?: number; sizeScale?: number; rotSpeed?: number; edgeColor?: string; sideHole?: boolean; sectorDensity?: boolean; bgPaused?: boolean; bgRotSpeed?: number };
+type Props = { onDone?: () => void; onConnect?: () => void; config?: MegaConfig; dense?: boolean; palette?: 'default' | 'random' | 'whiteBlue' | 'allWhite' | 'whiteBluePurple'; brightness?: number; showEdges?: boolean; edgeMultiplier?: number; fourCores?: boolean; asBackground?: boolean; syncKey?: string; nodeScale?: number; edgeFraction?: number; edgeAlpha?: number; sizeScale?: number; rotSpeed?: number; edgeColor?: string; sideHole?: boolean; sectorDensity?: boolean; bgPaused?: boolean; bgRotSpeed?: number; hideDots?: boolean };
 
-export default function LoginScene({ onDone, onConnect, config, dense, palette = 'default', brightness = 1.0, showEdges = false, edgeMultiplier = 1, fourCores = false, asBackground = false, syncKey = 'bg', nodeScale = 1.0, edgeFraction = 1.0, edgeAlpha = 1.0, sizeScale = 1.0, rotSpeed = 0.0, edgeColor = '#4da3ff', sideHole = false, sectorDensity = false, bgPaused = false, bgRotSpeed = 0.0 }: Props) {
+export default function LoginScene({ onDone, onConnect, config, dense, palette = 'allWhite', brightness = 1.0, showEdges = false, edgeMultiplier = 1, fourCores = false, asBackground = false, syncKey = 'bg', nodeScale = 1.0, edgeFraction = 1.0, edgeAlpha = 1.0, sizeScale = 1.0, rotSpeed = 0.0, edgeColor = '#cfd5dd', sideHole = false, sectorDensity = false, bgPaused = false, bgRotSpeed = 0.0, hideDots = false }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const reglRef = useRef<Regl | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -44,13 +44,13 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
 
   const isDense = !!dense;
   const cfg = {
-    particleCount: Math.max(1, Math.floor((isDense ? 280000 : 200000) * nodeScaleRef.current)),
+    particleCount: Math.max(1, Math.floor((isDense ? 260000 : 180000) * nodeScaleRef.current)),
     clusterCount: 9,
-    pointSizePx: isDense ? 3.2 : 7.0,
-    baseColor: isDense ? ([0.78, 0.65, 0.98] as [number, number, number]) : ([0.70, 0.62, 0.94] as [number, number, number]),
-    background: [0.04, 0.04, 0.07] as [number, number, number],
-    glow: isDense ? 1.15 : 0.95,
-    spokeFraction: isDense ? 0.24 : 0.12,
+    pointSizePx: isDense ? 4.0 : 11.0, // larger points for login globe
+    baseColor: [1.0, 1.0, 1.0] as [number, number, number], // white globe
+    background: [0.00, 0.00, 0.00] as [number, number, number],
+    glow: isDense ? 1.20 : 1.05,
+    spokeFraction: isDense ? 0.18 : 0.10,
     ...(config || {})
   };
   // Four-core hubs: two large, one medium, one small — clearly separated in space
@@ -354,7 +354,8 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
     
     // Simple edge system for sparse area fill
     const mult = Math.max(1, Math.min(3, Math.round(edgeMultiplier)));
-    const MAX_EDGES = (isDense ? 1200000 : (showEdges ? 1500000 : 1500)) * mult; // huge capacity for tons of edges
+    // Fewer edges for cleaner look on login
+    const MAX_EDGES = (isDense ? 240000 : (showEdges ? 120000 : 1200)) * mult;
     const edgeData = new Float32Array(MAX_EDGES * 6); // 2 points * 3 coords each
     let edgeCount = 0;
     // screen-space quad for outer sphere ring
@@ -558,6 +559,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
 
     // Edge renderer (used for dense mode and/or scaffolding)
     const edgeBuf = regl.buffer({ usage: 'dynamic', type: 'float', length: edgeData.byteLength });
+    const onlyEdges = hideDots
     const drawEdges = regl({
       vert: `
       precision highp float;
@@ -618,16 +620,22 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
         },
         u_rotSpeed: () => (asBackground ? Math.max(0.0, Math.min(0.05, bgRotSpeed || 0.0)) : rotSpeedRef.current),
         u_centerCut: () => 0.45,
-        u_edgeAlpha: () => (asBackground ? edgeAlphaRef.current * 0.5 : edgeAlphaRef.current),
+        // Softer grey with a touch of blue for edges
+        u_edgeAlpha: () => (onlyEdges ? Math.max(0.8, edgeAlphaRef.current * 1.8) : (asBackground ? Math.max(0.15, edgeAlphaRef.current * 0.65) : Math.max(0.35, edgeAlphaRef.current * 1.2))),
         u_edgeColor: () => edgeColorRef.current,
         u_globalBrightness: () => brightnessRef.current,
         u_frontFade: () => (asBackground ? [0.10, 0.40] : [10.0, 11.0]),
         u_frontCut: () => (asBackground ? 0.06 : 99.0),
         u_frontRadMin: () => (asBackground ? 0.70 : 2.0),
       },
-      count: () => Math.max(0, Math.floor(edgeCount * Math.max(0.0, Math.min(1.0, (asBackground ? edgeFractionRef.current * 0.3 : edgeFractionRef.current)))) * 2),
+      count: () => {
+        if (onlyEdges) return Math.max(0, edgeCount * 2)
+        const frac = Math.max(0.0, Math.min(1.0, (asBackground ? edgeFractionRef.current * 0.3 : edgeFractionRef.current)))
+        return Math.max(0, Math.floor(edgeCount * frac) * 2)
+      },
       primitive: 'lines',
       depth: { enable: false },
+      // Draw edges with strong additive plus slight alpha bias so they sit above points
       blend: { enable: true, func: { srcRGB: 'one', srcAlpha: 'one', dstRGB: 'one', dstAlpha: 'one' } }
     });
 
@@ -638,8 +646,13 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       try { regl.poll(); } catch {}
       try { regl.clear({ color: [cfg.background[0], cfg.background[1], cfg.background[2], 1], depth: 1 }); } catch {}
       try { drawOuter(); } catch {}
-      try { if (edgeCount > 0 && (isDense || showEdges || asBackground)) drawEdges(); } catch {}
-      try { draw(); } catch {}
+      // Experiment: optionally hide dots and show only edges
+      if (hideDots) {
+        try { if (edgeCount > 0) drawEdges(); } catch {}
+      } else {
+        try { draw(); } catch {}
+        try { if (edgeCount > 0) drawEdges(); } catch {}
+      }
       // If background is paused, draw once and stop scheduling frames
       if (asBackground && bgPaused) { rafRef.current = null; return }
       rafRef.current = requestAnimationFrame(loop);
@@ -808,22 +821,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
           }
         }
 
-        // Fallback: if very few edges were generated, top up with short random edges
-        if (ei < Math.min(60000 * mult, MAX_EDGES)) {
-          const target = Math.min(MAX_EDGES, ei + 60000 * mult);
-          while (ei < target) {
-            const i = ((Math.random() * M) | 0);
-            const j = (i + 1 + ((Math.random() * 500) | 0)) % M;
-            const x1 = pos0[i * 3], y1 = pos0[i * 3 + 1], z1 = pos0[i * 3 + 2];
-            const x2 = pos0[j * 3], y2 = pos0[j * 3 + 1], z2 = pos0[j * 3 + 2];
-            const dist = Math.sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1) + (z2-z1)*(z2-z1));
-            if (dist < (MAX_DIST*1.2)) {  // longer
-              edgeData[ei * 6 + 0] = x1; edgeData[ei * 6 + 1] = y1; edgeData[ei * 6 + 2] = z1;
-              edgeData[ei * 6 + 3] = x2; edgeData[ei * 6 + 4] = y2; edgeData[ei * 6 + 5] = z2;
-              ei++;
-            }
-          }
-        }
+        // No random fallback: keep edges strictly deterministic from spatial sampling
 
         // Sparse-areas fill: add extra edges where not near hubs and at mid radii
         if (ei < MAX_EDGES) {
@@ -947,12 +945,13 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
         
         edgeCount = ei;
         if (edgeCount > 0) {
-          // Thin edges to ~30% to reduce the red fill (cut ~70%)
-          const KEEP_RATIO = 0.30;
+          // Thinning: keep dense by default; if showEdges, keep almost all
+          const KEEP_RATIO_A = (showEdges ? 0.95 : 0.40);
+          const KEEP_RATIO_B = (showEdges ? 1.00 : 0.50);
           if (edgeCount > 0) {
             let write = 0;
             for (let t = 0; t < edgeCount; t++) {
-              if (Math.random() <= KEEP_RATIO) {
+              if (Math.random() <= KEEP_RATIO_A) {
                 const r = write * 6, s = t * 6;
                 edgeData[r + 0] = edgeData[s + 0];
                 edgeData[r + 1] = edgeData[s + 1];
@@ -965,11 +964,10 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
             }
             edgeCount = write;
           }
-          // Apply another 70% reduction
-          if (edgeCount > 0) {
+          if (!showEdges && edgeCount > 0) {
             let write2 = 0;
             for (let t = 0; t < edgeCount; t++) {
-              if (Math.random() <= 0.30) {
+              if (Math.random() <= KEEP_RATIO_B) {
                 const r = write2 * 6, s = t * 6;
                 edgeData[r + 0] = edgeData[s + 0];
                 edgeData[r + 1] = edgeData[s + 1];
@@ -985,6 +983,54 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
           try { if (alive) edgeBuf.subdata(edgeData.subarray(0, edgeCount * 6)) } catch {}
           try { if (!(window as any).__EDGE_LOGGED__) { (window as any).__EDGE_LOGGED__ = true; } } catch {}
         }
+      }
+      // If no edges were produced (or were all culled), build a deterministic sparse mesh once.
+      if (end === N && edgeCount === 0) {
+        const M = end
+        const RMAX = 0.85
+        const MIN_R = RMAX * 0.60
+        const MAX_DIST = 0.16
+        const K = 3
+        const Q = 14 // grid resolution per axis
+        const buckets = new Map<string, number[]>()
+        const norm = (x:number,y:number,z:number)=>{ const L=Math.hypot(x,y,z)||1e-6; return [x/L,y/L,z/L] as [number,number,number] }
+        const toKey = (ux:number,uy:number,uz:number)=> `${Math.floor((ux*0.5+0.5)*Q)},${Math.floor((uy*0.5+0.5)*Q)},${Math.floor((uz*0.5+0.5)*Q)}`
+        for (let i=0;i<M;i++){
+          const x=pos0[i*3], y=pos0[i*3+1], z=pos0[i*3+2]
+          const r=Math.hypot(x,y,z)||1e-6; if (r<MIN_R) continue
+          const [ux,uy,uz]=norm(x,y,z)
+          const key=toKey(ux,uy,uz)
+          let arr=buckets.get(key); if(!arr){arr=[]; buckets.set(key,arr)}
+          arr.push(i)
+        }
+        const neighborCandidates = (ux:number,uy:number,uz:number)=>{
+          const cx=Math.floor((ux*0.5+0.5)*Q), cy=Math.floor((uy*0.5+0.5)*Q), cz=Math.floor((uz*0.5+0.5)*Q)
+          const out:number[]=[]
+          for(let dx=-1;dx<=1;dx++) for(let dy=-1;dy<=1;dy++) for(let dz=-1;dz<=1;dz++){
+            const key=`${cx+dx},${cy+dy},${cz+dz}`
+            const arr=buckets.get(key); if(arr) out.push(...arr)
+          }
+          return out
+        }
+        let ei=0
+        for (let i=0;i<M && ei<MAX_EDGES;i++){
+          const x1=pos0[i*3], y1=pos0[i*3+1], z1=pos0[i*3+2]
+          const r1=Math.hypot(x1,y1,z1)||1e-6; if (r1<MIN_R) continue
+          const [ux,uy,uz]=norm(x1,y1,z1)
+          const cands=neighborCandidates(ux,uy,uz)
+          const scored: Array<{j:number,d:number}> = []
+          for(const j of cands){ if(j<=i) continue; const x2=pos0[j*3], y2=pos0[j*3+1], z2=pos0[j*3+2]; const d=Math.hypot(x2-x1,y2-y1,z2-z1); if(d>0 && d<=MAX_DIST) scored.push({j,d}) }
+          scored.sort((a,b)=> a.d-b.d)
+          const take=Math.min(K, scored.length)
+          for(let t=0;t<take && ei<MAX_EDGES;t++){
+            const j=scored[t].j
+            edgeData[ei*6+0]=x1; edgeData[ei*6+1]=y1; edgeData[ei*6+2]=z1
+            edgeData[ei*6+3]=pos0[j*3]; edgeData[ei*6+4]=pos0[j*3+1]; edgeData[ei*6+5]=pos0[j*3+2]
+            ei++
+          }
+        }
+        edgeCount = ei
+        try { if (alive) edgeBuf.subdata(edgeData.subarray(0, edgeCount*6)) } catch {}
       }
       
       if (end < N) scheduler(() => step(end));
@@ -1008,7 +1054,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       reglRef.current = null;
       alive = false;
     };
-  }, [isDense, showEdges, edgeMultiplier, fourCores, nodeScale, sideHole, sectorDensity, bgPaused, bgRotSpeed]);
+  }, [isDense, showEdges, edgeMultiplier, fourCores, nodeScale, sideHole, sectorDensity, bgPaused, bgRotSpeed, hideDots]);
 
   // Parallax with foreground pans
   useEffect(()=>{
@@ -1112,7 +1158,7 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
       {/* Wordmark + button stack (hidden in background mode) */}
       {!asBackground && (
       <div style={{ position:'absolute', left:'20%', top:'85%', transform:'translate(-50%, -50%)', zIndex:1000, color:'#fff', textAlign:'left' as const }}>
-        <div style={{ fontFamily: 'Orbitron, monospace', fontWeight: 400, opacity:0.9, letterSpacing:1.2, fontSize:60, lineHeight:1 }}>
+        <div style={{ fontFamily: 'Orbitron, monospace', fontWeight: 400, opacity:0.9, letterSpacing:1.1, fontSize:48, lineHeight:1 }}>
           <Typewriter text="OpenGraph" />
         </div>
         {!animating && (
@@ -1124,17 +1170,17 @@ export default function LoginScene({ onDone, onConnect, config, dense, palette =
             }}
             disabled={startedRef.current}
             style={{
-              marginTop: 20,
-              padding: '14px 32px',
+              marginTop: 18,
+              padding: '12px 26px',
               background: 'linear-gradient(145deg, rgba(255,255,255,0.15), rgba(255,255,255,0.05))',
               color: '#ffffff',
               border: '1px solid rgba(255,255,255,0.25)',
-              borderRadius: 16,
+              borderRadius: 14,
               cursor: 'pointer',
               boxShadow: '0 8px 32px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.2)',
               fontWeight: 600,
-              letterSpacing: 1.5,
-              fontSize: 14,
+              letterSpacing: 1.2,
+              fontSize: 13,
               textTransform: 'uppercase' as const,
               fontFamily: 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
               backdropFilter: 'blur(12px)',
