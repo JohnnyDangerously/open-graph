@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require('electron')
+const { app, BrowserWindow, ipcMain } = require('electron')
 // Relax web security for demo speed; guard if app not ready
 try { if (app && app.commandLine) {
   app.commandLine.appendSwitch('disable-features', 'OutOfBlinkCors')
@@ -40,6 +40,19 @@ async function createWindow(){
   } else {
     await loadBuilt()
   }
+
+  // IPC: open DevTools on demand from renderer
+  try {
+    // avoid re-registering on hot reloads
+    if (!(app).__openDevtoolsRegistered) {
+      ipcMain.handle('open-devtools', () => {
+        const focused = BrowserWindow.getFocusedWindow() || win
+        try { focused?.webContents?.openDevTools({ mode: 'detach' }) } catch {}
+        return true
+      })
+      ;(app).__openDevtoolsRegistered = true
+    }
+  } catch {}
 }
 
 app.whenReady().then(createWindow)

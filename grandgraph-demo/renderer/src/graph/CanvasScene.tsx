@@ -690,7 +690,7 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
         ctx.restore()
       }
 
-      function drawEdge(ctx: CanvasRenderingContext2D, edge: Edge, style?: { stroke?: string, width?: number, alphaMul?: number }) {
+      function drawEdge(ctx: CanvasRenderingContext2D, edge: Edge, style?: { stroke?: string, width?: number, alphaMul?: number, channel?: number, channels?: number }) {
         const sourceNode = nodes[edge.source]
         const targetNode = nodes[edge.target]
         if (!sourceNode || !targetNode || Number.isNaN(sourceNode.x) || Number.isNaN(targetNode.x)) return
@@ -753,8 +753,15 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
         const dx = B.y - A.y
         const dy = A.x - B.x
         const len = Math.hypot(dx, dy) || 1
-        const nx = (dx / len) * (amplitude + wobble) * sign
-        const ny = (dy / len) * (amplitude + wobble) * sign
+        const baseOffset = (amplitude + wobble) * sign
+        // Parallel-path separation: spread channels symmetrically and consistently
+        const channels = Math.max(1, Math.floor(style?.channels || 1))
+        const channel = Math.max(0, Math.min(channels - 1, Math.floor(style?.channel || 0)))
+        const sepNorm = channels > 1 ? (channel - (channels - 1) / 2) : 0
+        const sepPx = sepNorm * 8 // 8px separation between parallel paths at 100% zoom
+        const totalOffset = baseOffset + sepPx
+        const nx = (dx / len) * totalOffset
+        const ny = (dy / len) * totalOffset
         ctx.quadraticCurveTo(mx + nx, my + ny, B.x, B.y)
         ctx.stroke()
         if (style?.alphaMul && Number.isFinite(style.alphaMul)) { ctx.restore() }
@@ -891,102 +898,101 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
           ctx.fill()
         }
         ctx.restore()
-        // connector to next newer graph (or current if newest trail)
-        const nextCenter = ti === 0 ? currCenter : trail[ti-1]?.center
-        if (nextCenter) {
-          const A = worldToScreen(t.center.x, t.center.y)
-          const B = worldToScreen(nextCenter.x, nextCenter.y)
-          ctx.save()
-          ctx.strokeStyle = color
-          ctx.lineWidth = 3
-          ctx.setLineDash([8,6])
-          ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke()
-          ctx.restore()
-        }
+        // disabled connector guide between trail snapshots (removes dotted/cyan artifact)
       }
     } catch {}
 
-    // Compare-mode overlays: draw filled semi-circles and distinct overlap lens
+    // Compare-mode overlays: render two trees with top anchors at nodes[0] and nodes[1]
     try {
       const ov: any = (tile as any)?.compareOverlay
-      if (ov && ov.regions && ov.regions.left && ov.regions.right) {
-        const left = ov.regions.left
-        const right = ov.regions.right
-        const leftC = worldToScreen(left.cx||0, left.cy||0)
-        const rightC = worldToScreen(right.cx||0, right.cy||0)
-        const leftR1 = Math.max(4, (left.r1||200) * scale)
-        const leftR2 = Math.max(leftR1+1, (left.r2||360) * scale)
-        const rightR1 = Math.max(4, (right.r1||200) * scale)
-        const rightR2 = Math.max(rightR1+1, (right.r2||360) * scale)
+      if (ov && nodes && nodes.length >= 2) {
         const colors = (ov.colors||{})
-        const leftFirst = colors.leftFirst || 'rgba(122,110,228,0.30)'
-        const leftSecond = colors.leftSecond || 'rgba(122,110,228,0.18)'
-        const rightFirst = colors.rightFirst || 'rgba(122,110,228,0.30)'
-        const rightSecond = colors.rightSecond || 'rgba(122,110,228,0.18)'
-        const overlapFirst = colors.overlapFirst || 'rgba(255,195,130,0.26)'
-        const overlapSecond = colors.overlapSecond || 'rgba(255,195,130,0.16)'
-        // Left filled semi-circles for first and second degrees
-        ctx.save()
-        ctx.fillStyle = leftSecond
-        ctx.beginPath()
-        ctx.moveTo(leftC.x - leftR2, leftC.y)
-        ctx.arc(leftC.x, leftC.y, leftR2, Math.PI, 0, false)
-        ctx.lineTo(leftC.x, leftC.y)
-        ctx.closePath(); ctx.fill()
-        ctx.restore()
-        ctx.save()
-        ctx.fillStyle = leftFirst
-        ctx.beginPath()
-        ctx.moveTo(leftC.x - leftR1, leftC.y)
-        ctx.arc(leftC.x, leftC.y, leftR1, Math.PI, 0, false)
-        ctx.lineTo(leftC.x, leftC.y)
-        ctx.closePath(); ctx.fill()
-        ctx.restore()
-        // Right filled semi-circles for first and second degrees
-        ctx.save()
-        ctx.fillStyle = rightSecond
-        ctx.beginPath()
-        ctx.moveTo(rightC.x - rightR2, rightC.y)
-        ctx.arc(rightC.x, rightC.y, rightR2, Math.PI, 0, false)
-        ctx.lineTo(rightC.x, rightC.y)
-        ctx.closePath(); ctx.fill()
-        ctx.restore()
-        ctx.save()
-        ctx.fillStyle = rightFirst
-        ctx.beginPath()
-        ctx.moveTo(rightC.x - rightR1, rightC.y)
-        ctx.arc(rightC.x, rightC.y, rightR1, Math.PI, 0, false)
-        ctx.lineTo(rightC.x, rightC.y)
-        ctx.closePath(); ctx.fill()
-        ctx.restore()
-        // Overlap first-degree band (inner radius)
-        ctx.save()
-        ctx.beginPath()
-        ctx.moveTo(leftC.x - leftR1, leftC.y)
-        ctx.arc(leftC.x, leftC.y, leftR1, Math.PI, 0, false)
-        ctx.lineTo(leftC.x, leftC.y)
-        ctx.closePath(); ctx.clip()
-        ctx.fillStyle = overlapFirst
-        ctx.beginPath()
-        ctx.moveTo(rightC.x - rightR1, rightC.y)
-        ctx.arc(rightC.x, rightC.y, rightR1, Math.PI, 0, false)
-        ctx.lineTo(rightC.x, rightC.y)
-        ctx.closePath(); ctx.fill()
-        ctx.restore()
-        // Overlap second-degree band (outer radius)
-        ctx.save()
-        ctx.beginPath()
-        ctx.moveTo(leftC.x - leftR2, leftC.y)
-        ctx.arc(leftC.x, leftC.y, leftR2, Math.PI, 0, false)
-        ctx.lineTo(leftC.x, leftC.y)
-        ctx.closePath(); ctx.clip()
-        ctx.fillStyle = overlapSecond
-        ctx.beginPath()
-        ctx.moveTo(rightC.x - rightR2, rightC.y)
-        ctx.arc(rightC.x, rightC.y, rightR2, Math.PI, 0, false)
-        ctx.lineTo(rightC.x, rightC.y)
-        ctx.closePath(); ctx.fill()
-        ctx.restore()
+        const colLeft = colors.leftFirst || 'rgba(122,110,228,0.35)'
+        const colRight = colors.rightFirst || 'rgba(255,140,170,0.35)'
+        const colOverlap = colors.overlapFirst || 'rgba(255,195,130,0.85)'
+
+        const leftTop = worldToScreen(nodes[0].x, nodes[0].y)
+        const rightTop = worldToScreen(nodes[1].x, nodes[1].y)
+        const midX = (leftTop.x + rightTop.x) / 2
+        const trunkLen = 220 * Math.max(0.5, Math.min(2.2, scale))
+        const rootY = Math.max(leftTop.y, rightTop.y) + trunkLen
+        const joinY = Math.min(rootY - 60, (leftTop.y + rightTop.y)/2 + trunkLen*0.55)
+
+        const drawTrunk = (top:{x:number,y:number}, color:string, dir:number)=>{
+          ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = 3
+          ctx.beginPath(); ctx.moveTo(top.x, top.y); ctx.lineTo(top.x + dir*20, joinY); ctx.lineTo(top.x + dir*40, rootY); ctx.stroke()
+          // outer root
+          ctx.beginPath(); ctx.arc(top.x + dir*80, rootY + 8, 6, 0, Math.PI*2); ctx.fillStyle = color; ctx.fill()
+          // side branches
+          for(let i=1;i<=3;i++){
+            const t = i/4
+            const bx = top.x + dir * 18 * t
+            const by = top.y + (rootY - top.y) * (t*0.7)
+            ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx + dir*(60 + 30*t), by + 24); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke()
+          }
+          ctx.restore()
+        }
+        // shared middle connector between trunks
+        ctx.save(); ctx.strokeStyle = colOverlap; ctx.lineWidth = 3
+        ctx.beginPath(); ctx.moveTo(leftTop.x + 18, joinY); ctx.lineTo(midX, joinY + 10); ctx.lineTo(rightTop.x - 18, joinY); ctx.stroke()
+        ctx.beginPath(); ctx.arc(midX, joinY + 10, 6, 0, Math.PI*2); ctx.fillStyle = colOverlap; ctx.fill(); ctx.restore()
+
+        drawTrunk(leftTop, colLeft, -1)
+        drawTrunk(rightTop, colRight, +1)
+
+        // Per-node connectors (subtle twigs) from anchors to visible nodes
+        try {
+          const lwBase = Math.max(1.2, Math.min(3.2, 1.8 * scale))
+          const anchorLeft = { x: leftTop.x, y: leftTop.y + 6 }
+          const anchorRight = { x: rightTop.x, y: rightTop.y + 6 }
+          const overlapOrigin = { x: midX, y: joinY + 10 }
+          const sanitize = (value: any): number[] => {
+            if (!value) return []
+            if (Array.isArray(value)) return value.map((v) => Number(v)).filter((v) => Number.isFinite(v))
+            if (ArrayBuffer.isView(value)) return Array.from(value as ArrayLike<number>).map((v) => Number(v)).filter((v) => Number.isFinite(v))
+            return []
+          }
+          const rawGroups: any = (tile as any)?.compareIndexGroups || null
+          const leftIndices = new Set<number>(sanitize(rawGroups?.left).filter((i) => i >= 0 && i < nodes.length))
+          const rightIndices = new Set<number>(sanitize(rawGroups?.right).filter((i) => i >= 0 && i < nodes.length))
+          const overlapIndices = new Set<number>(sanitize(rawGroups?.overlap).filter((i) => i >= 0 && i < nodes.length))
+          const drawLine = (from: { x: number; y: number }, to: { x: number; y: number }, color: string, width: number) => {
+            ctx.beginPath()
+            ctx.moveTo(from.x, from.y)
+            ctx.lineTo(to.x, to.y)
+            ctx.strokeStyle = color
+            ctx.lineWidth = width
+            ctx.stroke()
+          }
+          ctx.save()
+          ctx.lineCap = 'round'
+          ctx.setLineDash([])
+          for (let i=2;i<nodes.length;i++){
+            const n = nodes[i]
+            const p = worldToScreen(n.x, n.y)
+            if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue
+            const region = overlapIndices.has(i) ? 'overlap' : (leftIndices.has(i) ? 'left' : (rightIndices.has(i) ? 'right' : 'auto'))
+            if (region === 'left') {
+              drawLine(anchorLeft, p, 'rgba(122,110,228,0.42)', lwBase)
+            } else if (region === 'right') {
+              drawLine(anchorRight, p, 'rgba(255,140,170,0.42)', lwBase)
+            } else if (region === 'overlap') {
+              drawLine(overlapOrigin, p, 'rgba(255,195,130,0.62)', lwBase + 0.5)
+              drawLine(anchorLeft, p, 'rgba(122,110,228,0.24)', Math.max(1, lwBase * 0.7))
+              drawLine(anchorRight, p, 'rgba(255,140,170,0.24)', Math.max(1, lwBase * 0.7))
+            } else {
+              const distMid = Math.abs(p.x - midX)
+              if (distMid <= 18) {
+                drawLine(overlapOrigin, p, 'rgba(255,195,130,0.45)', lwBase)
+              } else if (p.x < midX) {
+                drawLine(anchorLeft, p, 'rgba(122,110,228,0.32)', lwBase)
+              } else {
+                drawLine(anchorRight, p, 'rgba(255,140,170,0.32)', lwBase)
+              }
+            }
+          }
+          ctx.restore()
+        } catch {}
       }
     } catch {}
     
@@ -994,6 +1000,16 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
     if (edges && edges.length > 0) {
       // Optionally thin out when zoomed far out for performance/clarity
       const step = scale < 0.9 && edges.length > 2000 ? Math.ceil(edges.length / 2000) : 1
+      // Precompute parallel-path channels per undirected pair for clear separation
+      const pairCount = new Map<string, number>()
+      for (let i = 0; i < edges.length; i += 1) {
+        const e = edges[i]
+        const a = Math.min(e.source|0, e.target|0)
+        const b = Math.max(e.source|0, e.target|0)
+        const key = `${a}-${b}`
+        pairCount.set(key, (pairCount.get(key) || 0) + 1)
+      }
+      const pairOrder = new Map<string, number>()
       const mode = props.maskMode || 'hide'
       for (let i = 0; i < edges.length; i += step) {
         const e = edges[i]
@@ -1009,12 +1025,29 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
         if (!draw) continue
         // Temporarily reduce global alpha for dimmed edges
         if (dim) { ctx.save(); ctx.globalAlpha *= 0.22 }
-        drawEdge(ctx, e)
+        const a = Math.min(e.source|0, e.target|0)
+        const b = Math.max(e.source|0, e.target|0)
+        const key = `${a}-${b}`
+        const total = pairCount.get(key) || 1
+        const used = pairOrder.get(key) || 0
+        pairOrder.set(key, used + 1)
+        drawEdge(ctx, e, { channels: total, channel: used })
         if (dim) ctx.restore()
       }
     }
-    
-    // Draw nodes - People Network style
+    // Highlighted edges (selected node) should render after base edges but BEFORE nodes
+    try {
+      const si = typeof props.selectedIndex === 'number' ? props.selectedIndex : -1
+      if (si >= 0 && edges && edges.length > 0) {
+        const style = { stroke: 'rgba(255, 236, 160, 0.9)', width: 2.4, alphaMul: 1.0 }
+        for (let i=0;i<edges.length;i++){
+          const e = edges[i]
+          if (e.source === si || e.target === si) drawEdge(ctx, e, style)
+        }
+      }
+    } catch {}
+
+    // Draw nodes LAST - People Network style
     let visibleNodes = 0
     // Pre-count visible label candidates to set dynamic stride relative to on-screen density
     let visibleLabelCandidates = 0
@@ -1061,6 +1094,7 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       return prev
     })()
     const modeNodes = props.maskMode || 'hide'
+    const pendingLabels: Array<{ i:number, x:number, y:number, text:string, dimmed:boolean }> = []
     for (let i = 0; i < nodes.length; i++) {
       const vm = visibleMaskRef.current
       const maskedOut = vm && vm.length === nodes.length && !vm[i]
@@ -1179,7 +1213,7 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
       
       ctx.restore()
 
-      // Labels: always show selected or center/anchor label; bridges ~1/7 sampled; person ego ~1/8 relative to on-screen candidates; others ~1/4 (deterministic by label hash)
+      // Queue labels to draw after nodes
       if (labelsRef.current && labelsRef.current[i]){
         const isBridge = node.group === 1
         const isAnchor = (i === 0) || (i === 1)
@@ -1192,38 +1226,32 @@ const CanvasScene = forwardRef<GraphSceneHandle, GraphSceneProps>(function Canva
         const isSelected = typeof props.selectedIndex === 'number' && props.selectedIndex === i
         const show = isSelected || isAnchor || (isBridge ? pickBridge : pickOther)
         if (show) {
-          // Draw label
           const centerX = screen.x
           const centerY = screen.y - renderR - 12
-          if (dimmed) { ctx.save(); ctx.globalAlpha *= 0.35; drawLabel(ctx, labelsRef.current[i], centerX, centerY); ctx.restore() }
-          else { drawLabel(ctx, labelsRef.current[i], centerX, centerY) }
-          // Record hitbox for click handling
-          try {
-            const pad = 4
-            const m = ctx.measureText(labelsRef.current[i])
-            const w = (m?.width || 0) + pad*2
-            const h = 16
-            labelHitboxesRef.current.push({ index: i, x: centerX - w/2, y: centerY - h/2, w, h })
-          } catch {}
+          pendingLabels.push({ i, x: centerX, y: centerY, text: lbl, dimmed })
         }
       }
     }
     
+    // Draw labels in a separate pass so nodes/avatars never get occluded by text
+    for (const item of pendingLabels){
+      if (item.dimmed) { ctx.save(); ctx.globalAlpha *= 0.35; drawLabel(ctx, item.text, item.x, item.y); ctx.restore() }
+      else { drawLabel(ctx, item.text, item.x, item.y) }
+      // Record hitboxes for click handling
+      try {
+        const pad = 4
+        const m = ctx.measureText(item.text)
+        const w = (m?.width || 0) + pad*2
+        const h = 16
+        labelHitboxesRef.current.push({ index: item.i, x: item.x - w/2, y: item.y - h/2, w, h })
+      } catch {}
+    }
+
     // Debug logging disabled
-    
+
     ctx.restore()
     
-    // Selected-node overlay: draw its incident edges on top for visibility
-    try {
-      const si = typeof props.selectedIndex === 'number' ? props.selectedIndex : -1
-      if (si >= 0 && edges && edges.length > 0) {
-        const style = { stroke: 'rgba(255, 236, 160, 0.95)', width: 3.0, alphaMul: 1.0 }
-        for (let i=0;i<edges.length;i++){
-          const e = edges[i]
-          if (e.source === si || e.target === si) drawEdge(ctx, e, style)
-        }
-      }
-    } catch {}
+    // No edge redraw here so nodes and labels remain above highlights
 
     // Report stats
     if (props.onStats) {

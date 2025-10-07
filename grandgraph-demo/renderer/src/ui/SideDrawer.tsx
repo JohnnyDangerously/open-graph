@@ -150,6 +150,10 @@ export default function SideDrawer(props: SideDrawerProps) {
               zIndex: 5,
               // ensure underline has space
               alignItems: 'flex-end',
+              // Single row, horizontally scrollable
+              flexWrap: 'nowrap',
+              overflowX: 'auto',
+              overflowY: 'hidden',
             }}
           >
             {tabs.map((t) => (
@@ -172,6 +176,7 @@ export default function SideDrawer(props: SideDrawerProps) {
                   borderBottom: active?.id === t.id ? '2px solid var(--dt-accent, #8ab4f8)' : '2px solid transparent',
                   lineHeight: 1.6,
                   userSelect: 'none',
+                  flexShrink: 0,
                 }}
               >
                 <span>{t.label}</span>

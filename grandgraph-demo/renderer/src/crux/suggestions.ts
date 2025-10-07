@@ -45,6 +45,9 @@ const ENTITY_STARTER: Suggestion[] = [
   { id: 'seed-person-mark-aguirre', type: 'entity', value: 'person:16187301763635908446', label: 'Mark Aguirre', description: 'High-degree network' },
   { id: 'seed-person-melissa-williams', type: 'entity', value: 'person:10148933528123724725', label: 'Melissa Williams', description: 'High-degree network' },
 
+  // Quick command: Edge Decomposition for a known person id
+  { id: 'seed-edge-decomp-jill', type: 'history', value: 'edge decomposition person:17460185506374950457', label: 'Edge Decomposition • Jill Cisneros', description: 'Run edge decomposition for person:17460185506374950457' },
+
   // Bridge examples (keep good pairings)
   { id: 'seed-bridge-amzn-walmart', type: 'history', value: 'company:11125032872491181068 ^ company:9946666062803016585', label: 'Bridges: Amazon.com Inc. ^ Walmart Inc.', description: 'Bridge candidates between companies' },
   { id: 'seed-bridge-deloitte-wells', type: 'history', value: 'company:15386976225069648853 ^ company:16859218261549140953', label: 'Bridges: Deloitte ^ Wells Fargo & Company', description: 'Bridge candidates between companies' },

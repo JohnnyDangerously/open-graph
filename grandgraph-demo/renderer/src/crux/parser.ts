@@ -448,22 +448,27 @@ export function parseExpression(text: string): Expression {
       continue;
     }
 
-    // Set operators
-    for (const [key, op] of setOps.entries()) {
-      if (rest.startsWith(key)) {
-        idx += key.length;
-        const tok: SetOpToken = {
-          id: tokenId(),
-          type: 'set-op',
-          raw: key,
-          value: key,
-          op,
-          start,
-          end: idx,
-        };
-        pushToken(tok);
-        continue;
+    // Set operators (ensure we don't fall through and emit a duplicate literal)
+    {
+      let matchedSetOp = false;
+      for (const [key, op] of setOps.entries()) {
+        if (rest.startsWith(key)) {
+          idx += key.length;
+          const tok: SetOpToken = {
+            id: tokenId(),
+            type: 'set-op',
+            raw: key,
+            value: key,
+            op,
+            start,
+            end: idx,
+          };
+          pushToken(tok);
+          matchedSetOp = true;
+          break;
+        }
       }
+      if (matchedSetOp) continue;
     }
 
     // Single-char operators

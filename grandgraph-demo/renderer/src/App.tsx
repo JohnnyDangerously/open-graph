@@ -13,7 +13,7 @@ import TabPeople from "./ui/TabPeople";
 import CompareLists from "./ui/CompareLists";
 import TabCompanies from "./ui/TabCompanies";
 import TabConnections from "./ui/TabConnections";
-import { fetchBridgesTileJSON, fetchAvatarMap, fetchEdgeDecomposition, type EdgeDecompositionData } from "./lib/api";
+import { fetchBridgesTileJSON, fetchAvatarMap, fetchEdgeDecomposition, fetchMigrationPairs, type EdgeDecompositionData } from "./lib/api";
 import { fetchIntroPaths, type IntroPathsResult, fetchNearbyExecsAtCompany, fetchNetworkByFilter } from "./lib/api";
 import { resolveSmart, loadTileSmart } from "./smart";
 // demo modules removed
@@ -52,6 +52,9 @@ type EdgeDecompositionEdge = {
 type EdgeDecompositionNeighborView = EdgeDecompositionData["neighbors"][number] & {
   index: number
   facets: string[]
+  // Optional fields for 1- vs 2-hop grouping when we build from an existing tile
+  distance?: 1 | 2
+  viaIndex?: number | null
 }
 
 type EdgeDecompositionView = {
@@ -115,6 +118,9 @@ export default function App(){
   const [edgeDecompFacet, setEdgeDecompFacet] = useState<string | null>(null)
   const [edgeDecompMask, setEdgeDecompMask] = useState<boolean[] | null>(null)
   const [edgeDecompLoading, setEdgeDecompLoading] = useState(false)
+  // Focus Paths (≤2 hops)
+  const [focusPathsView, setFocusPathsView] = useState<null | { tile: ParsedTile, srcIndex: number, dstIndex: number, midIndices: number[], direct: boolean }>(null)
+  const [focusPathsLimit, setFocusPathsLimit] = useState<number>(10)
 
   const handleSceneRef = (instance: SceneRef | null) => {
     sceneRef.current = instance
@@ -389,7 +395,7 @@ export default function App(){
           group: 1,
         }
         neighborIndexMap.set(neighbor.id, idx)
-        neighborsView.push({ ...neighbor, index: idx, facets: [] })
+        neighborsView.push({ ...neighbor, index: idx, facets: [], distance: 1, viaIndex: null })
         placed += 1
         nodeIndex += 1
       }
@@ -548,6 +554,184 @@ export default function App(){
     }
   }
 
+  // Build a 1- and 2-hop subgraph from the CURRENT tile using adjacency, limited to depth 2.
+  // If targetCanonical is provided, constrain to paths that end at that target.
+  function buildTwoHopPathsViewFromTile(sourceCanonical: string, targetCanonical?: string | null): EdgeDecompositionView {
+    const src = String(sourceCanonical||'').trim()
+    const dst = (targetCanonical||'') ? String(targetCanonical).trim() : null
+    const base = latestTileRef.current as ParsedTile | null
+    if (!base) { throw new Error('No active graph to compute paths from.') }
+
+    // Map canonical id to index in current tile using meta.nodes if available
+    const meta = (base as any)?.meta?.nodes as Array<any> | undefined
+    const labelsArr: string[] | undefined = (base as any)?.labels
+    const normalize = (s:string)=> s.toLowerCase()
+    const matchesCanonical = (node:any, canonical:string)=>{
+      const c = normalize(canonical)
+      const idA = String(node?.id ?? '').toLowerCase()
+      const pid = String(node?.person_id ?? '').toLowerCase()
+      const cid = String(node?.company_id ?? '').toLowerCase()
+      // Accept raw numeric id too
+      const raw = c.replace(/^person:|^company:/,'')
+      return (idA === c || idA === raw) || (pid && (pid === c || pid === raw)) || (cid && (cid === c || cid === raw))
+    }
+    const findIndexForCanonical = (canonical:string): number => {
+      if (Array.isArray(meta)) {
+        for (let i=0;i<meta.length;i++){ if (matchesCanonical(meta[i], canonical)) return i }
+      }
+      // Fallback: try label exact match
+      if (Array.isArray(labelsArr)){
+        const idx = labelsArr.findIndex(l=> String(l||'').toLowerCase() === normalize(canonical))
+        if (idx >= 0) return idx
+      }
+      // Last resort: if canonical is like person:0 or company:0 and tile index exists
+      try { const raw = Number.parseInt(canonical.replace(/[^0-9]/g,''),10); if (Number.isFinite(raw) && raw>=0 && raw < (base.count|0)) return raw } catch {}
+      return -1
+    }
+
+    const srcIdx = findIndexForCanonical(src)
+    if (srcIdx < 0) throw new Error(`Source not found in current graph: ${sourceCanonical}`)
+    const dstIdx = dst ? findIndexForCanonical(dst) : -1
+    if (dst && dstIdx < 0) throw new Error(`Target not found in current graph: ${targetCanonical}`)
+
+    // Build adjacency from base.edges
+    const count = base.count|0
+    const rawEdges: Uint32Array | Uint16Array | undefined = (base as any).edges
+    const baseEdgeWeights: Float32Array | undefined = (base as any).edgeWeights
+    const adj: number[][] = Array.from({length: count}, ()=>[])
+    const wMap = new Map<string, number>()
+    if (rawEdges && rawEdges.length >= 2){
+      for (let i=0;i<rawEdges.length;i+=2){
+        const a = rawEdges[i]|0, b = rawEdges[i+1]|0
+        if (a<count && b<count && a!==b){
+          adj[a].push(b); adj[b].push(a)
+          const ei = i/2
+          const w = (baseEdgeWeights && baseEdgeWeights.length>ei) ? (baseEdgeWeights[ei] || 1) : 1
+          const k1 = a<b?`${a}-${b}`:`${b}-${a}`
+          if (!wMap.has(k1)) wMap.set(k1, w)
+        }
+      }
+    }
+
+    // 1-hop neighbors
+    const first = new Set<number>(adj[srcIdx])
+    // 2-hop paths (src -> mid -> t). If dst provided, constrain to that t.
+    const secondPairs: Array<{ via:number, t:number }>=[]
+    const seenPair = new Set<string>()
+    for (const mid of first){
+      const step2 = adj[mid]
+      for (const t of step2){
+        if (t === srcIdx) continue
+        if (dst && t !== dstIdx) continue
+        // allow t==mid? skip self
+        if (first.has(t)){
+          // If also direct, we still record the introducer path separately
+        }
+        const key = `${mid}-${t}`
+        if (seenPair.has(key)) continue
+        seenPair.add(key)
+        secondPairs.push({ via: mid, t })
+      }
+    }
+
+    // Collect nodes to include: src, all direct neighbors (optionally filtered if dst specified to those equal to dst), and second-hop targets
+    const include = new Set<number>()
+    include.add(srcIdx)
+    first.forEach(n=>{ if (!dst || n===dstIdx) include.add(n) })
+    for (const p of secondPairs){ include.add(p.via); include.add(p.t) }
+
+    // Build compact tile
+    const indexMap = new Map<number, number>()
+    const rev: number[] = []
+    Array.from(include.values()).forEach((oldIdx, i)=>{ indexMap.set(oldIdx, i); rev[i]=oldIdx })
+    const nCount = include.size
+    const nodes = new Float32Array(nCount*2)
+    const size = new Float32Array(nCount)
+    const alpha = new Float32Array(nCount)
+    const group = new Uint16Array(nCount)
+    const labels: string[] = new Array(nCount)
+    const metaNodes: Array<Record<string, unknown>> = new Array(nCount)
+    for (let i=0;i<nCount;i++){
+      const old = rev[i]
+      nodes[i*2] = (base as any).nodes[old*2]
+      nodes[i*2+1] = (base as any).nodes[old*2+1]
+      size[i] = (base as any).size?.[old] || 6
+      alpha[i] = (base as any).alpha?.[old] || 1
+      group[i] = (base as any).group?.[old] || 1
+      labels[i] = (labelsArr?.[old]) || String(meta?.[old]?.full_name || meta?.[old]?.name || meta?.[old]?.company || meta?.[old]?.id || `#${old}`)
+      metaNodes[i] = (meta?.[old] ? { ...meta[old] } : { id: old }) as any
+    }
+
+    const edgeList: Array<{ a:number, b:number, w:number }>=[]
+    const addEdge = (oa:number, ob:number)=>{
+      const a = indexMap.get(oa)!, b = indexMap.get(ob)!
+      if (typeof a !== 'number' || typeof b !== 'number') return
+      const k = a<b?`${a}-${b}`:`${b}-${a}`
+      if ((edgeList as any)._seen?.has(k)) return
+      ;((edgeList as any)._seen ||= new Set()).add(k)
+      const w = wMap.get(oa<ob?`${oa}-${ob}`:`${ob}-${oa}`) || 1
+      edgeList.push({ a, b, w })
+    }
+
+    // Add only edges that are part of 1- or 2-hop relationships from src
+    for (const n of first){ if (!dst || n===dstIdx) addEdge(srcIdx, n) }
+    for (const p of secondPairs){ addEdge(srcIdx, p.via); addEdge(p.via, p.t) }
+
+    const edgesArr = new Uint32Array(edgeList.length*2)
+    const outEdgeWeights = new Float32Array(edgeList.length)
+    edgeList.forEach((e,i)=>{ edgesArr[i*2]=e.a; edgesArr[i*2+1]=e.b; outEdgeWeights[i]=e.w })
+
+    const tile: ParsedTile & { labels?: string[]; meta?: { nodes: Array<Record<string, unknown>> } } = {
+      count: nCount,
+      nodes,
+      size,
+      alpha,
+      group,
+      edges: edgesArr,
+      edgeWeights: outEdgeWeights,
+    } as any
+    ;(tile as any).labels = labels
+    ;(tile as any).meta = { nodes: metaNodes }
+    ;(tile as any).focusWorld = { x: (((base as any)?.focusWorld?.x) ?? nodes[0]) || 0, y: (((base as any)?.focusWorld?.y) ?? nodes[1]) || 0 }
+
+    // Neighbors view with grouping
+    const neighborsView: EdgeDecompositionNeighborView[] = []
+    // Direct
+    for (const n of first){
+      if (dst && n!==dstIdx) continue
+      const idx = indexMap.get(n)!
+      const label = labels[idx]
+      const node = metaNodes[idx]
+      neighborsView.push({ id: String((node as any)?.id ?? n), name: (node as any)?.name as any, title: (node as any)?.title as any, company: (node as any)?.company as any, companyId: (node as any)?.company_id as any, overlapDays: 0, peerDays: 0, communityDays: 0, calendarDays: 0, sharedCompanies: 0, emailScore: 0, linkedinConnections: 0, companies: [], index: idx, facets: ["Work History"], distance: 1, viaIndex: null })
+    }
+    // Introducers
+    for (const p of secondPairs){
+      const tIdxNew = indexMap.get(p.t)!
+      const viaIdxNew = indexMap.get(p.via)!
+      const node = metaNodes[tIdxNew]
+      neighborsView.push({ id: String((node as any)?.id ?? p.t), name: (node as any)?.name as any, title: (node as any)?.title as any, company: (node as any)?.company as any, companyId: (node as any)?.company_id as any, overlapDays: 0, peerDays: 0, communityDays: 0, calendarDays: 0, sharedCompanies: 0, emailScore: 0, linkedinConnections: 0, companies: [], index: tIdxNew, facets: ["Work History"], distance: 2, viaIndex: viaIdxNew })
+    }
+
+    // Palette/facets minimal
+    const palette: Record<string,string> = { "Work History": '#60a5fa' }
+    const facets: EdgeFacetSummary[] = [{ key:'Work History', label:'Work History', color: palette['Work History'], count: neighborsView.length }]
+
+    // Center info from meta[srcIdx]
+    const centerNode = meta?.[srcIdx] || {}
+    const center = {
+      id: String((centerNode as any)?.id ?? srcIdx),
+      canonicalId: (typeof (centerNode as any)?.id === 'string' && /^(person|company):/i.test(String((centerNode as any)?.id))) ? String((centerNode as any)?.id) : undefined,
+      name: (centerNode as any)?.name || labelsArr?.[srcIdx] || null,
+      title: (centerNode as any)?.title || null,
+      company: (centerNode as any)?.company || null,
+      companyId: (centerNode as any)?.company_id != null ? String((centerNode as any)?.company_id) : null,
+      seniority: null,
+      linkedinConnections: null,
+    }
+
+    return { tile, center, neighbors: neighborsView, edges: edgeList.map(e=>({ source:e.a, target:e.b, weight:e.w, facets:["Work History"] })), labels, metaNodes, facets, palette }
+  }
+
   const executeIntroPathsCommand = async (params: { S: string, company: string, icp?: string, k?: number, minRMT?: number }) => {
     const SId = await ensureEntityId(params.S)
     const CId = await ensureCompanyId(params.company)
@@ -563,6 +747,24 @@ export default function App(){
     setSelectedPathIndex(null)
     setIntroPathsTileMask(null)
     setNearbyExecs([])
+    // Inject avatars into tile meta for CanvasScene
+    try {
+      const meta: any[] | undefined = (built.tile as any)?.meta?.nodes
+      const idsForLookup = Array.isArray(meta) ? meta.map((n:any)=> String(n?.id ?? n?.person_id ?? '')).filter(Boolean) : []
+      let chMap = new Map<string,string>()
+      try { if (idsForLookup.length) chMap = await fetchAvatarMap(idsForLookup) } catch {}
+      const av = new Array((built.tile as any).count||0).fill('').map((_, i)=>{
+        const node:any = meta?.[i] || {}
+        const explicit = (node?.avatar_url || node?.avatarUrl) as string | undefined
+        if (explicit) return explicit
+        const keyA = String(node?.id ?? '')
+        const keyB = String(node?.person_id ?? '')
+        const fromCH = (keyA && chMap.has(keyA)) ? chMap.get(keyA)! : (keyB && chMap.has(keyB)) ? chMap.get(keyB)! : ''
+        return fromCH || ''
+      })
+      setAvatars(av)
+      try { if (Array.isArray(meta)) meta.forEach((n:any, idx:number)=>{ const u = av[idx]; if (u) n.avatar_url = u }) } catch {}
+    } catch {}
     sceneRef.current?.setForeground(built.tile as any)
     setFocus(`Intro Paths: ${result.S} → company:${result.companyId}`)
     try { (sceneRef.current as any)?.focusIndex?.(0, { animate: true, ms: 480, zoom: 1.4 }) } catch {}
@@ -808,14 +1010,52 @@ export default function App(){
     try { console.log('Compare tile labels', labels.length) } catch {}
     setLabels(labels)
     setMetaNodes([])
-    // For compare, skip external avatar fallbacks to avoid rate limits
-    try { setAvatars(new Array(compareTile.count).fill('')) } catch { setAvatars([]) }
+    // Inject avatars for Compare: prefer explicit urls first; then async ClickHouse lookup (no await)
+    try {
+      const meta: any[] | undefined = (compareTile as any)?.meta?.nodes
+      const idsForLookup = Array.isArray(meta) ? meta.map((n:any)=> String(n?.id ?? n?.person_id ?? '')).filter(Boolean) : []
+      let chMap = new Map<string,string>()
+      // Initial pass using only explicit URLs
+      const initial = new Array(compareTile.count).fill('').map((_, i)=>{
+        const node:any = meta?.[i] || {}
+        const explicit = (node?.avatar_url || node?.avatarUrl) as string | undefined
+        if (explicit) return explicit
+        return ''
+      })
+      setAvatars(initial)
+      try { if (Array.isArray(meta)) meta.forEach((n:any, idx:number)=>{ const u = initial[idx]; if (u) n.avatar_url = u }) } catch {}
+      try { latestTileRef.current = compareTile as ParsedTile } catch {}
+      // Async enrichment from ClickHouse avatar map
+      try {
+        if (idsForLookup.length) {
+          fetchAvatarMap(idsForLookup).then((m)=>{
+            chMap = m || new Map<string,string>()
+            const enriched = new Array(compareTile.count).fill('').map((_, i)=>{
+              const node:any = meta?.[i] || {}
+              const explicit = (node?.avatar_url || node?.avatarUrl) as string | undefined
+              if (explicit) return explicit
+              const keyA = String(node?.id ?? '')
+              const keyB = String(node?.person_id ?? '')
+              const fromCH = (keyA && chMap.has(keyA)) ? chMap.get(keyA)! : (keyB && chMap.has(keyB)) ? chMap.get(keyB)! : ''
+              return fromCH || ''
+            })
+            setAvatars(enriched)
+            try { if (Array.isArray(meta)) meta.forEach((n:any, idx:number)=>{ const u = enriched[idx]; if (u) n.avatar_url = u }) } catch {}
+          }).catch(()=>{})
+        }
+      } catch {}
+    } catch { try { setAvatars(new Array(compareTile.count).fill('')) } catch { setAvatars([]) } }
 
     const groups = (compareTile as any).compareIndexGroups as
       | { left?: number[]; right?: number[]; overlap?: number[] }
       | undefined
     if (groups) {
-      setCompareGroups(groups)
+      const safeGroups: { left: number[]; right: number[]; overlap: number[] } = {
+        left: groups.left || [],
+        right: groups.right || [],
+        overlap: groups.overlap || [],
+      }
+      setCompareGroups(safeGroups)
       try { setCompareLists(((compareTile as any)?.compareLists) || null) } catch { setCompareLists(null) }
       try { (window as any).__COMPARE_GROUPS = { groups, lists: (compareTile as any)?.compareLists || null } } catch {}
       try { console.log('Compare groups stats', {
@@ -1045,10 +1285,10 @@ export default function App(){
     // Normalize for name lookup: rows carry numeric ids; anchors are canonical `company:<id>`
     const leftNum = leftId.replace(/^company:/i, '')
     const rightNum = rightId.replace(/^company:/i, '')
-    const leftName = rows.find((row) => row.from_id === leftNum)?.from_name
-      || rows.find((row) => row.to_id === leftNum)?.to_name
-    const rightName = rows.find((row) => row.from_id === rightNum)?.from_name
-      || rows.find((row) => row.to_id === rightNum)?.to_name
+    const leftName = rows.find((row: any) => row.from_id === leftNum)?.from_name
+      || rows.find((row: any) => row.to_id === leftNum)?.to_name
+    const rightName = rows.find((row: any) => row.from_id === rightNum)?.from_name
+      || rows.find((row: any) => row.to_id === rightNum)?.to_name
     const tile = buildMigrationTile(leftId, rightId, rows, { leftName, rightName })
     setErr(null)
     setLabels(tile.labels || [])
@@ -1184,9 +1424,54 @@ export default function App(){
   ) => {
     setEdgeDecompLoading(true)
     try {
-      const data = await fetchEdgeDecomposition(personCanonical)
-      if (ridLocal !== runIdRef.current) return
-      const view = buildEdgeDecompositionView(data)
+      // Optional syntax: "edge decomposition <src> -> <dst>"
+      let view: EdgeDecompositionView | null = null
+      const arrow = commandText.split(/->/i)
+      if (arrow.length >= 2) {
+        const left = arrow[0].replace(/edge\s+decomposition/i,'').trim() || personCanonical
+        const right = arrow[1].trim()
+        // Focus Paths (≤2 hops) mode using induced subgraph and fixed layout
+        try {
+          const focus = await (async()=>{
+            // inline small builder to avoid large refactor
+            const result = await (async()=>{
+              // reuse buildTwoHopPathsViewFromTile to ensure ids exist (no heavy compute)
+              return await (async()=>{ return null })()
+            })()
+            return await (async()=>{ return await (buildFocusPathsViewFromTile as any)(left, right, focusPathsLimit) })()
+          })()
+          if (ridLocal !== runIdRef.current) return
+          setFocusPathsView(focus)
+          setEdgeDecompView(null)
+          setEdgeDecompFacet(null)
+          setEdgeDecompMask(null)
+          setIntroPathsResult(null)
+          setIntroPathsTileMask(null)
+          setPeopleSearchMask(null)
+          setConnectionsMask(null)
+          setCompaniesMask(null)
+          setCompareGroups(null)
+          setSidebarIndices(null)
+          setSelectedRegion(null)
+          setNearbyExecs([])
+          setSelectedIndex(null)
+          latestTileRef.current = focus.tile as any
+          try { (focus.tile as any).meta.mode = 'focus' } catch {}
+          sceneRef.current?.setForeground(focus.tile as any)
+          const leftName = (focus.tile as any)?.labels?.[focus.srcIndex] || left
+          const rightName = (focus.tile as any)?.labels?.[focus.dstIndex] || right
+          setFocus(`Focus Paths: ${leftName} → ${rightName}`)
+          setErr(null)
+        } catch (e:any) {
+          setErr(e?.message || 'Focus Paths failed')
+        }
+        return
+      } else {
+        const data = await fetchEdgeDecomposition(personCanonical)
+        if (ridLocal !== runIdRef.current) return
+        view = buildEdgeDecompositionView(data)
+      }
+      if (ridLocal !== runIdRef.current || !view) return
       setEdgeDecompView(view)
       setEdgeDecompFacet(null)
       setEdgeDecompMask(null)
@@ -1223,6 +1508,17 @@ export default function App(){
           return ''
         })
         setAvatars(avatarsNext)
+        // Write avatar urls back into the tile meta so CanvasScene can lazy-load images
+        try {
+          const metaArr: any[] | undefined = (view.tile as any)?.meta?.nodes
+          if (Array.isArray(metaArr)){
+            const n = Math.min(metaArr.length, avatarsNext.length)
+            for (let i=0;i<n;i++){
+              const u = avatarsNext[i]
+              if (u) { try { (metaArr[i] as any).avatar_url = u } catch {} }
+            }
+          }
+        } catch {}
       } catch (avatarErr) {
         console.warn('AvatarMap(edge decomposition) failed', avatarErr)
         if (ridLocal === runIdRef.current) {
@@ -1233,6 +1529,7 @@ export default function App(){
       latestTileRef.current = view.tile as ParsedTile
       try { (view.tile as any).meta.mode = 'person' } catch {}
       sceneRef.current?.setForeground(view.tile as any)
+      try { (sceneRef.current as any)?.reshapeLayout?.('hierarchy', { animate: true, ms: 600 }) } catch {}
 
       const focusLabel = view.center.name || view.center.canonicalId || personCanonical
       setFocus(`Edge Decomposition: ${focusLabel}`)
@@ -1769,213 +2066,149 @@ export default function App(){
   }
 
   function buildCompareTile(a: ParsedTile, b: ParsedTile, opts?: { highlight?: 'left'|'right'|'overlap' }){
-    // Compute degrees with dual thresholds: 24m for both first and second-degree hops
+    // Compute degree sets
     const degA = degreesForDual(a, MIN_OVERLAP_MONTHS, MIN_OVERLAP_MONTHS)
     const degB = degreesForDual(b, MIN_OVERLAP_MONTHS, MIN_OVERLAP_MONTHS)
     const mapA = buildIdLabelMap(a as any)
     const mapB = buildIdLabelMap(b as any)
-    // Overlap categories
-    const mutualF1 = Array.from(degA.firstIds).filter(id=>degB.firstIds.has(id))
-    const mutualF2 = Array.from(degA.secondIds).filter(id=>degB.secondIds.has(id))
-    const aF1_bF2 = Array.from(degA.firstIds).filter(id=>degB.secondIds.has(id) && !degB.firstIds.has(id))
-    const bF1_aF2 = Array.from(degB.firstIds).filter(id=>degA.secondIds.has(id) && !degA.firstIds.has(id))
-    const aOnly = Array.from(new Set<string>([...degA.firstIds, ...degA.secondIds])).filter(id=>!degB.firstIds.has(id) && !degB.secondIds.has(id))
-    const bOnly = Array.from(new Set<string>([...degB.firstIds, ...degB.secondIds])).filter(id=>!degA.firstIds.has(id) && !degA.secondIds.has(id))
-    try {
-      console.log('compare category raw sizes', {
-        mutualF1: mutualF1.length,
-        mutualF2: mutualF2.length,
-        aF1_bF2: aF1_bF2.length,
-        bF1_aF2: bF1_aF2.length,
-        aOnly: aOnly.length,
-        bOnly: bOnly.length,
-      })
-    } catch {}
+    const mutualF1 = Array.from(degA.firstIds).filter(id => degB.firstIds.has(id))
+    const mutualF2 = Array.from(degA.secondIds).filter(id => degB.secondIds.has(id))
+    const aF1_bF2 = Array.from(degA.firstIds).filter(id => degB.secondIds.has(id) && !degB.firstIds.has(id))
+    const bF1_aF2 = Array.from(degB.firstIds).filter(id => degA.secondIds.has(id) && !degA.firstIds.has(id))
+    const aOnly = Array.from(new Set<string>([...degA.firstIds, ...degA.secondIds])).filter(id => !degB.firstIds.has(id) && !degB.secondIds.has(id))
+    const bOnly = Array.from(new Set<string>([...degB.firstIds, ...degB.secondIds])).filter(id => !degA.firstIds.has(id) && !degA.secondIds.has(id))
+    try { console.log('compare category sizes (tree)', { mutualF1: mutualF1.length, mutualF2: mutualF2.length, aF1_bF2: aF1_bF2.length, bF1_aF2: bF1_aF2.length, aOnly: aOnly.length, bOnly: bOnly.length }) } catch {}
 
-    // Sanity diagnostics: if strict work-only graph is empty, surface a clear message instead of drawing nothing
     const totalCats = degA.first.length + degA.second.length + degB.first.length + degB.second.length
-    if (totalCats === 0) {
-      try { setErr('No work-overlap edges (>=24 months) found for either ego. Please choose another pair or relax the threshold.'); } catch {}
-    }
+    if (totalCats === 0) { try { setErr('No work-overlap edges (>=24 months) found for either ego.'); } catch {} }
 
-    // Map id -> source tile and original index to get labels
-    const labelFor = (id:string)=> mapA.get(id) || mapB.get(id) || id
+    const labelFor = (id: string) => mapA.get(id) || mapB.get(id) || id
+    const hash01 = (s: string) => { let h = 2166136261 >>> 0; for (let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0 } return (h % 100000) / 100000 }
 
-    // Deterministic helpers
-    const hashStr01 = (s:string): number => {
-      let h = 2166136261 >>> 0
-      for (let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0 }
-      return (h % 100000) / 100000
-    }
-    const clamp = (x:number, a:number, b:number)=> Math.max(a, Math.min(b, x))
-    const inSemiRing = (x:number,y:number,cx:number,cy:number,rIn:number,rOut:number)=>{
-      const dx=x-cx, dy=y-cy; const d=Math.hypot(dx,dy)
-      return (y <= cy + 1) && (d >= rIn) && (d <= rOut)
-    }
-    const projectIntoSemiRing = (x:number,y:number,cx:number,cy:number,rIn:number,rOut:number)=>{
-      // Force into upper half
-      const yy = Math.min(y, cy)
-      const dx = x - cx, dy = yy - cy
-      const d = Math.max(1e-6, Math.hypot(dx,dy))
-      let r = clamp(d, Math.max(0,rIn), Math.max(rIn+1,rOut))
-      const ux = dx / d, uy = dy / d
-      return { x: cx + ux * r, y: cy + uy * r }
-    }
-    const placeDeterministic = (
-      ids: string[], cx:number, cy:number, rMin:number, rMax:number,
-      pred: (x:number,y:number)=> boolean,
-      opts2:{ baseSize:number, bgSize:number, region:'left'|'right'|'overlap', ring:'first'|'second'|'cross', highlight?:boolean }
-    )=>{
-      const indices: number[] = []
-      const highlightRegion = opts?.highlight || null
-      const emphasize = (highlightRegion && highlightRegion === opts2.region)
-      const ratio = emphasize ? 1.0 : (opts2.ring === 'first' || opts2.ring === 'cross' ? 0.22 : 0.16)
-      const maxStrong = Math.ceil(ids.length * ratio)
-      const strongEvery = Math.max(1, Math.floor(ids.length / Math.max(1, maxStrong)))
-      for (let i=0;i<ids.length;i++){
-        const id = ids[i]
-        // deterministic angle in [0, PI]
-        const t = hashStr01(id)
-        const ang = Math.PI * t
-        // deterministic radius within [rMin, rMax]
-        const rj = rMin + (rMax - rMin) * hashStr01(id + ':r')
-        let x = cx + Math.cos(ang) * rj
-        let y = cy - Math.sin(ang) * rj
-        if (!pred(x,y)){
-          // try small deterministic jitter and then project
-          const jx = (hashStr01(id + ':jx') - 0.5) * Math.min(18, (rMax - rMin) * 0.1)
-          const jy = (hashStr01(id + ':jy') - 0.5) * Math.min(18, (rMax - rMin) * 0.1)
-          let xx = x + jx, yy = y + jy
-          if (!pred(xx,yy)){
-            const p = projectIntoSemiRing(xx, yy, cx, cy, rMin, rMax)
-            xx = p.x; yy = p.y
-          }
-          x = xx; y = yy
-        }
-        nodes.push(x, y)
-        const isStrong = (i % strongEvery === 0) || emphasize
-        size.push(isStrong ? opts2.baseSize : opts2.bgSize)
-        alpha.push(isStrong ? 0.85 : 0.18)
-        labels.push(labelFor(id))
-        indices.push((nodes.length/2)-1)
-      }
-      return indices
-    }
-
-    // Even downsampling helper so we show ~1/2 of nodes per group
-    const sampleEven = <T,>(arr: T[], fraction = 0.5): T[] => {
-      const n = arr.length|0; if (n === 0) return arr
-      const target = Math.max(1, Math.floor(n * fraction))
-      if (target >= n) return arr
-      const step = n / target
-      const out: T[] = []
-      for (let k=0;k<target;k++){
-      const idx = Math.min(n-1, Math.floor(k * step))
-      if (!out.includes(arr[idx])) out.push(arr[idx])
-        out.push(arr[idx])
-      }
-      return out
-    }
-
-    // Layout params
-    // Centers and radii chosen to GUARANTEE overlap for both first and second rings
-    const leftCX = -160, rightCX = 160, baseCY = 260
-    const r1 = 200, r2 = 360
+    // Geometry for tree layout
+    const baseCY = 260
+    const leftCX = -200
+    const rightCX = 200
+    const trunkLen = 230
+    const topY = baseCY - trunkLen - 60
     const midCX = 0
+    // Bands (rects) for placing nodes deterministically
+    const band = (x1:number,x2:number,y1:number,y2:number,id:string)=>({
+      x: x1 + (x2-x1) * hash01(id),
+      y: y1 + (y2-y1) * hash01(id + ':y')
+    })
 
-    // Centers
     const nodes: number[] = []
     const size: number[] = []
     const alpha: number[] = []
     const labels: string[] = []
+    const groups: number[] = []
     const indexGroups = { left: [] as number[], right: [] as number[], overlap: [] as number[] }
-    const lists = {
-      mutualF1: [] as number[],
-      aF1_bF2: [] as number[],
-      bF1_aF2: [] as number[],
-      aOnly: [] as number[],
-      bOnly: [] as number[],
-    }
+    const lists = { mutualF1: [] as number[], aF1_bF2: [] as number[], bF1_aF2: [] as number[], aOnly: [] as number[], bOnly: [] as number[] } as any
+    const regionToGroup: Record<'left'|'right'|'overlap', number> = { left: 0, overlap: 1, right: 2 }
     const seenIds = new Set<string>()
 
-    // Center nodes for A and B (reserve their ids so no duplicates appear as orange dots)
+    // Anchor people at the top of each tree
     const centerAId = nodeIdFor(a as any, 0)
     const centerBId = nodeIdFor(b as any, 0)
     seenIds.add(centerAId); seenIds.add(centerBId)
-    nodes.push(leftCX, baseCY); size.push(14); alpha.push(1.0); labels.push(labelFor(centerAId))
-    nodes.push(rightCX, baseCY); size.push(14); alpha.push(1.0); labels.push(labelFor(centerBId))
+    nodes.push(leftCX, topY)
+    size.push(14); alpha.push(1.0); labels.push(labelFor(centerAId))
+    groups.push(regionToGroup.left)
+    nodes.push(rightCX, topY)
+    size.push(14); alpha.push(1.0); labels.push(labelFor(centerBId))
+    groups.push(regionToGroup.right)
 
-    // Ring placements (deterministic & bounded). Dedupe by id before placing.
-    function addGroupDet(idsIn:string[], cx:number, cy:number, rMin:number, rMax:number, opts2:{ baseSize:number, bgSize:number, region:'left'|'right'|'overlap', ring:'first'|'second'|'cross', pred?:(x:number,y:number)=>boolean }){
-      const pred = opts2.pred || (()=>true)
-      const ids = idsIn.filter(id=>{ if (seenIds.has(id)) return false; seenIds.add(id); return true })
-      const placed = placeDeterministic(ids, cx, cy, Math.max(0,rMin), Math.max(rMin+1,rMax), pred, opts2)
-      for (const idx of placed) indexGroups[opts2.region].push(idx)
+    // Selection limits: default ~18 nodes with ~65% overlaps
+    const pickK = (ids: string[], k: number): string[] => {
+      if (!Array.isArray(ids) || ids.length === 0 || k >= ids.length) return [...ids]
+      const arr = [...ids].sort((a,b)=> hash01(a) - hash01(b))
+      return arr.slice(0, Math.max(0, k))
+    }
+    const TARGET_TOTAL = 18
+    const overlapTarget = Math.max(4, Math.round(TARGET_TOTAL * 0.65))
+    const uniqueTarget = Math.max(2, TARGET_TOTAL - overlapTarget)
+    const leftUniqueTarget = Math.floor(uniqueTarget/2)
+    const rightUniqueTarget = uniqueTarget - leftUniqueTarget
+    // Build prioritized overlap slate
+    const overlapSelected: string[] = []
+    const takeInto = (src: string[], k: number) => { const want = Math.max(0, k); const add = pickK(src.filter(id=>!overlapSelected.includes(id)), want); overlapSelected.push(...add) }
+    takeInto(mutualF1, Math.min(mutualF1.length, Math.round(overlapTarget * 0.6)))
+    if (overlapSelected.length < overlapTarget) takeInto(aF1_bF2, Math.round((overlapTarget - overlapSelected.length) * 0.5))
+    if (overlapSelected.length < overlapTarget) takeInto(bF1_aF2, overlapTarget - overlapSelected.length)
+    if (overlapSelected.length < overlapTarget) takeInto(mutualF2, overlapTarget - overlapSelected.length)
+    // Unique picks
+    const aOnlySelected = pickK(aOnly, leftUniqueTarget)
+    const bOnlySelected = pickK(bOnly, rightUniqueTarget)
+    // If still under target (rare), backfill from remaining pools
+    let deficit = TARGET_TOTAL - (2 + overlapSelected.length + aOnlySelected.length + bOnlySelected.length)
+    if (deficit > 0) {
+      const pools = [
+        mutualF1.filter(id=>!overlapSelected.includes(id)),
+        aF1_bF2.filter(id=>!overlapSelected.includes(id)),
+        bF1_aF2.filter(id=>!overlapSelected.includes(id)),
+        mutualF2.filter(id=>!overlapSelected.includes(id)),
+        aOnly.filter(id=>!aOnlySelected.includes(id)),
+        bOnly.filter(id=>!bOnlySelected.includes(id)),
+      ]
+      for (const pool of pools){
+        if (deficit <= 0) break
+        const add = pickK(pool, Math.min(deficit, Math.ceil(deficit/2)))
+        overlapSelected.push(...add)
+        deficit = TARGET_TOTAL - (2 + overlapSelected.length + aOnlySelected.length + bOnlySelected.length)
+      }
     }
 
-    // Geometry helpers for region predicates
-    const insideHalfAnnulus = (x:number,y:number, cx:number, cy:number, rIn:number, rOut:number)=> inSemiRing(x,y,cx,cy,rIn,rOut)
-    const dTo = (x:number,y:number,cx:number,cy:number)=> Math.hypot(x-cx,y-cy)
-    const inLeftFirst = (x:number,y:number)=> dTo(x,y,leftCX,baseCY) <= r1 && y <= baseCY
-    const inRightFirst = (x:number,y:number)=> dTo(x,y,rightCX,baseCY) <= r1 && y <= baseCY
-    const inLeftSecond = (x:number,y:number)=> dTo(x,y,leftCX,baseCY) > r1 && dTo(x,y,leftCX,baseCY) <= r2 && y <= baseCY
-    const inRightSecond = (x:number,y:number)=> dTo(x,y,rightCX,baseCY) > r1 && dTo(x,y,rightCX,baseCY) <= r2 && y <= baseCY
+    // Helper to place ids into a rectangular band with deterministic jitter
+    const placeBand = (idsIn: string[], x1:number,x2:number,y1:number,y2:number, opts:{ base:number, bg:number, region:'left'|'right'|'overlap', listKey?: string }) => {
+      const ids = idsIn.filter(id=>{ if (seenIds.has(id)) return false; seenIds.add(id); return true })
+      const strongEvery = Math.max(1, Math.floor(ids.length / Math.max(1, Math.ceil(ids.length * 0.28))))
+      for (let i=0;i<ids.length;i++){
+        const id = ids[i]
+        const p = band(x1,x2,y1,y2,id)
+        nodes.push(p.x, p.y)
+        const strong = (i % strongEvery) === 0
+        size.push(strong ? opts.base : opts.bg)
+        alpha.push(strong ? 0.88 : 0.2)
+        labels.push(labelFor(id))
+        groups.push(regionToGroup[opts.region])
+        const idx = (nodes.length/2)-1
+        indexGroups[opts.region].push(idx)
+        if (opts.listKey) { (lists as any)[opts.listKey].push(idx) }
+      }
+    }
 
-    // First-degree unique and mutual — keep a clear gap around centers so no dot sits on a center
-    const firstInnerGap = Math.max(28, Math.floor(r1 * 0.18))
-    addGroupDet(sampleEven(Array.from(degA.firstIds).filter(id=>!mutualF1.includes(id) && !aF1_bF2.includes(id))), leftCX, baseCY, firstInnerGap, r1, { baseSize:4.6, bgSize:0.8, region:'left', ring:'first', pred:(x,y)=> inLeftFirst(x,y) && !(inRightFirst(x,y) || inRightSecond(x,y)) })
-    addGroupDet(sampleEven(Array.from(degB.firstIds).filter(id=>!mutualF1.includes(id) && !bF1_aF2.includes(id))), rightCX, baseCY, firstInnerGap, r1, { baseSize:4.6, bgSize:0.8, region:'right', ring:'first', pred:(x,y)=> inRightFirst(x,y) && !(inLeftFirst(x,y) || inLeftSecond(x,y)) })
-    const placedMutualF1 = placeDeterministic(mutualF1, midCX, baseCY, Math.max(0, firstInnerGap), r1, (x,y)=> inLeftFirst(x,y) && inRightFirst(x,y), { baseSize:5.0, bgSize:0.9, region:'overlap', ring:'first' })
-    for (const idx of placedMutualF1) { indexGroups.overlap.push(idx); lists.mutualF1.push(idx) }
-    const placedAF1B2 = placeDeterministic(aF1_bF2, (leftCX+midCX)/2, baseCY, Math.max(0, firstInnerGap), r1, (x,y)=> inLeftFirst(x,y) && inRightSecond(x,y) && !inRightFirst(x,y), { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross' })
-    for (const idx of placedAF1B2) { indexGroups.overlap.push(idx); lists.aF1_bF2.push(idx) }
-    const placedBF1A2 = placeDeterministic(bF1_aF2, (rightCX+midCX)/2, baseCY, Math.max(0, firstInnerGap), r1, (x,y)=> inRightFirst(x,y) && inLeftSecond(x,y) && !inLeftFirst(x,y), { baseSize:4.4, bgSize:0.8, region:'overlap', ring:'cross' })
-    for (const idx of placedBF1A2) { indexGroups.overlap.push(idx); lists.bF1_aF2.push(idx) }
-    lists.mutualF1Raw = mutualF1
-    lists.aF1_bF2Raw = aF1_bF2
-    lists.bF1_aF2Raw = bF1_aF2
+    // Layout bands
+    const leftOuterX1 = leftCX - 320, leftOuterX2 = leftCX - 60
+    const rightOuterX1 = rightCX + 60, rightOuterX2 = rightCX + 320
+    const outerY1 = topY + trunkLen * 0.35, outerY2 = baseCY + 180
+    const midX1 = -120, midX2 = 120
+    const midY1 = topY + trunkLen * 0.55, midY2 = baseCY + 60
+    const crossLeftX1 = -180, crossLeftX2 = -20
+    const crossRightX1 = 20, crossRightX2 = 180
 
-    // Second-degree
-    addGroupDet(sampleEven(Array.from(degA.secondIds).filter(id=>!mutualF2.includes(id))), leftCX, baseCY, r1, r2, { baseSize:3.4, bgSize:0.7, region:'left', ring:'second', pred:(x,y)=> inLeftSecond(x,y) && !(inRightFirst(x,y) || inRightSecond(x,y)) })
-    addGroupDet(sampleEven(Array.from(degB.secondIds).filter(id=>!mutualF2.includes(id))), rightCX, baseCY, r1, r2, { baseSize:3.4, bgSize:0.7, region:'right', ring:'second', pred:(x,y)=> inRightSecond(x,y) && !(inLeftFirst(x,y) || inLeftSecond(x,y)) })
-    addGroupDet(sampleEven(mutualF2), midCX, baseCY, r1, r2, { baseSize:3.6, bgSize:0.8, region:'overlap', ring:'second', pred:(x,y)=> inLeftSecond(x,y) && inRightSecond(x,y) && !(inLeftFirst(x,y) && inRightFirst(x,y)) })
+    // Unique near outer roots (limited)
+    placeBand(aOnlySelected, leftOuterX1, leftOuterX2, topY + trunkLen*0.35, baseCY + 180, { base: 4.8, bg: 1.0, region: 'left', listKey: 'aOnly' })
+    placeBand(bOnlySelected, rightOuterX1, rightOuterX2, topY + trunkLen*0.35, baseCY + 180, { base: 4.8, bg: 1.0, region: 'right', listKey: 'bOnly' })
+    // Overlap/bridge area in the middle (limited prioritized set)
+    const selMutualF1 = overlapSelected.filter(id=>mutualF1.includes(id))
+    const selAF1B2 = overlapSelected.filter(id=>aF1_bF2.includes(id))
+    const selBF1A2 = overlapSelected.filter(id=>bF1_aF2.includes(id))
+    const selMutualF2 = overlapSelected.filter(id=>mutualF2.includes(id))
+    placeBand(selMutualF1, midX1, midX2, midY1, midY2, { base: 5.2, bg: 1.2, region: 'overlap', listKey: 'mutualF1' })
+    placeBand(selAF1B2, crossLeftX1, crossLeftX2, midY1, midY2, { base: 4.6, bg: 1.0, region: 'overlap', listKey: 'aF1_bF2' })
+    placeBand(selBF1A2, crossRightX1, crossRightX2, midY1, midY2, { base: 4.6, bg: 1.0, region: 'overlap', listKey: 'bF1_aF2' })
+    placeBand(selMutualF2, midX1+10, midX2-10, baseCY + 40, baseCY + 140, { base: 3.8, bg: 0.9, region: 'overlap' })
 
-    // Non-overlapping pools (optional, already covered above as A-only/B-only across rings)
-    // Use small jitter around outer radius
-    const placedAOnly = placeDeterministic(aOnly, leftCX-40, baseCY, r2+10, r2+80, ()=> true, { baseSize:3.8, bgSize:1.6, region:'left', ring:'second' as any })
-    for (const idx of placedAOnly) { indexGroups.left.push(idx); lists.aOnly.push(idx) }
-    const placedBOnly = placeDeterministic(bOnly, rightCX+40, baseCY, r2+10, r2+80, ()=> true, { baseSize:3.8, bgSize:1.6, region:'right', ring:'second' as any })
-    for (const idx of placedBOnly) { indexGroups.right.push(idx); lists.bOnly.push(idx) }
-
-    const out: ParsedTile = {
-      count: nodes.length/2,
-      nodes: new Float32Array(nodes),
-      size: new Float32Array(size),
-      alpha: new Float32Array(alpha),
-      group: new Uint16Array(nodes.length/2),
-      // no edges for clarity
-    } as any
+    const out: ParsedTile = { count: nodes.length/2, nodes: new Float32Array(nodes), size: new Float32Array(size), alpha: new Float32Array(alpha), group: new Uint16Array(groups) } as any
     ;(out as any).labels = labels
     ;(out as any).compareIndexGroups = indexGroups
     ;(out as any).compareLists = lists
-    ;(out as any).compareOverlay = {
-      // regions carry both radii for overlay renderer
-      regions: {
-        left: { cx: leftCX, cy: baseCY, r1, r2 },
-        right: { cx: rightCX, cy: baseCY, r1, r2 },
-        overlap: { cx: midCX, cy: baseCY, r1, r2 }
-      },
-      colors: {
-        leftFirst: 'rgba(122,110,228,0.30)',
-        leftSecond: 'rgba(122,110,228,0.18)',
-        rightFirst: 'rgba(122,110,228,0.30)',
-        rightSecond: 'rgba(122,110,228,0.18)',
-        overlapFirst: opts?.highlight==='overlap' ? 'rgba(255,195,130,0.34)' : 'rgba(255,195,130,0.26)',
-        overlapSecond: opts?.highlight==='overlap' ? 'rgba(255,195,130,0.22)' : 'rgba(255,195,130,0.16)'
-      }
-    }
-    // Focus at mid for first render
-    ;(out as any).focusWorld = { x: 0, y: baseCY }
+    // Keep existing compareOverlay contract for hit tests; colors emphasize overlap when highlighted
+    const r1 = 200, r2 = 360
+    ;(out as any).compareOverlay = { regions:{ left:{ cx:-160, cy:baseCY, r1, r2 }, right:{ cx:160, cy:baseCY, r1, r2 }, overlap:{ cx:0, cy:baseCY, r1, r2 } }, colors:{ leftFirst:'rgba(122,110,228,0.30)', leftSecond:'rgba(122,110,228,0.18)', rightFirst:'rgba(122,110,228,0.30)', rightSecond:'rgba(122,110,228,0.18)', overlapFirst: opts?.highlight==='overlap' ? 'rgba(255,195,130,0.34)' : 'rgba(255,195,130,0.26)', overlapSecond: opts?.highlight==='overlap' ? 'rgba(255,195,130,0.22)' : 'rgba(255,195,130,0.16)' } }
+    ;(out as any).focusWorld = { x: midCX, y: baseCY }
+    ;(out as any).meta = { mode: 'person' }
     return out
   }
 
@@ -2310,18 +2543,14 @@ export default function App(){
               borderRadius: 12,
               padding: '10px 12px',
               boxShadow: '0 8px 18px rgba(0,0,0,0.32)',
-              maxHeight: 220,
+              maxHeight: 260,
               overflowY: 'auto',
             }}
           >
-            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6, letterSpacing: 0.15 }}>Top connections</div>
-            <div style={{ display: 'grid', gap: 6 }}>
-              {edgeDecompView.neighbors.length === 0 && (
-                <div style={{ fontSize: 11, opacity: 0.68 }}>
-                  No overlapping stints (≥90 days) found for this person.
-                </div>
-              )}
-              {edgeDecompView.neighbors.slice(0, 6).map((neighbor) => {
+            {(()=>{
+              const direct = edgeDecompView.neighbors.filter(n=> (n as any).distance !== 2)
+              const intro = edgeDecompView.neighbors.filter(n=> (n as any).distance === 2)
+              const renderItem = (neighbor: any) => {
                 const months = neighbor.overlapDays ? Math.round(neighbor.overlapDays / 30) : 0
                 return (
                   <button
@@ -2350,14 +2579,36 @@ export default function App(){
                     </div>
                     <div style={{ fontSize: 11, marginTop: 4, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                       <span style={{ opacity: 0.75 }}>{months}m shared</span>
-                      {neighbor.facets.slice(0, 2).map((facet) => (
+                      {(neighbor.facets || []).slice(0, 2).map((facet: string) => (
                         <span key={facet} style={{ opacity: 0.65 }}>{facet}</span>
                       ))}
+                      {(neighbor as any).distance === 2 && typeof (neighbor as any).viaIndex === 'number' && (
+                        <span style={{ opacity: 0.75 }}>via {labels[(neighbor as any).viaIndex as number] || '—'}</span>
+                      )}
                     </div>
                   </button>
                 )
-              })}
-            </div>
+              }
+              return (
+                <div style={{ display:'grid', gap:8 }}>
+                  {direct.length>0 && (
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 600, margin: '0 0 6px 0', letterSpacing: 0.15 }}>1️⃣ Direct connections</div>
+                      <div style={{ display:'grid', gap:6 }}>{direct.slice(0,6).map(renderItem)}</div>
+                    </div>
+                  )}
+                  {intro.length>0 && (
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 600, margin: '8px 0 6px 0', letterSpacing: 0.15 }}>2️⃣ Introducers</div>
+                      <div style={{ display:'grid', gap:6 }}>{intro.slice(0,6).map(renderItem)}</div>
+                    </div>
+                  )}
+                  {direct.length===0 && intro.length===0 && (
+                    <div style={{ fontSize: 11, opacity: 0.68 }}>No connections in 1–2 hops.</div>
+                  )}
+                </div>
+              )
+            })()}
           </div>
         </div>
       )}
@@ -2487,7 +2738,7 @@ export default function App(){
             <div style={{ color:'var(--dt-text-dim)', fontSize:13 }}>Compare groups browser coming soon.</div>
           ), disabled: false },
           { id:'settings', label:'Settings', render: ()=> (
-            <div style={{ display:'grid', gap:12 }}>
+            <div style={{ display:'grid', gap:12, minWidth: 360 }}>
               <div>
                 <div style={{ fontSize:12, color:'var(--dt-text-dim)', marginBottom:4 }}>Renderer</div>
                 <div style={{ display:'flex', gap:6 }}>
@@ -2509,6 +2760,21 @@ export default function App(){
                   <input type="checkbox" checked={showFeaturePanel} onChange={(e)=> setShowFeaturePanel(e.target.checked)} />
                   <span>Show feature panel</span>
                 </label>
+              </div>
+              <div>
+                <div style={{ fontSize:12, color:'var(--dt-text-dim)', marginBottom:4 }}>Developer</div>
+                <button
+                  onClick={()=>{
+                    try {
+                      const er = (window as any)?.require ? (window as any).require('electron') : null
+                      if (er?.ipcRenderer?.invoke) { er.ipcRenderer.invoke('open-devtools'); return }
+                    } catch {}
+                    try { (console as any).log('DevTools request (no Electron ipc)') } catch {}
+                  }}
+                  style={{ padding:'6px 10px', fontSize:12, border:'1px solid var(--dt-border)', borderRadius:6, background:'var(--dt-fill-weak)', color:'var(--dt-text)' }}
+                >
+                  Open Dev Console
+                </button>
               </div>
             </div>
           ), disabled: false },

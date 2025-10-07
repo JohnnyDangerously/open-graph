@@ -4,8 +4,8 @@
   "scripts": {
     "dev": "concurrently -k \"vite --config renderer/vite.config.ts --port 5174\" \"wait-on http://127.0.0.1:5174 && env -u ELECTRON_RUN_AS_NODE ELECTRON_START_URL=http://127.0.0.1:5174 electron electron/main.js\"",
     "build:renderer": "vite build --config renderer/vite.config.ts",
-    "build": "npm run build:renderer && env -u ELECTRON_RUN_AS_NODE electron electron/main.js --build",
-    "start": "env -u ELECTRON_RUN_AS_NODE electron electron/main.js"
+    "build": "npm run build:renderer && electron electron/main.js --build",
+    "start": "electron electron/main.js"
   },
   "devDependencies": {
     "@types/node": "^20",
